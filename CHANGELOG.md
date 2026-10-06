@@ -9,7 +9,7 @@ published release or a claim that a hosted deployment has been updated.
 
 - Open contribution workflow, issue/PR templates, maintainer review routing,
   governance, conduct and private security reporting guidance.
-- Credential-free Python 3.10–3.14 and Node.js frontend CI, a Docker build smoke
+- Credential-free Python 3.10–3.14 and Node.js frontend CI, a Docker image build and no-key startup/authentication smoke
   check, explicit package build metadata, and an isolated wheel-install check.
   Actions are SHA-pinned; dependency
   updates are scheduled monthly without automatic merging or publication.

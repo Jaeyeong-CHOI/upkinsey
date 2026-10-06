@@ -64,6 +64,89 @@ jobs:
           persist-credentials: false
       - name: Build the deployment image (no inference or publication)
         run: docker build --tag upkinsey:ci .
+      - name: Start the image with fixture credentials and no API key
+        id: start_container
+        run: |
+          docker run --detach --name upkinsey-ci-smoke \
+            --publish 127.0.0.1:15173:5173 \
+            --env UPKINSEY_HOST=0.0.0.0 \
+            --env PORT=5173 \
+            --env UPSTAGE_API_KEY= \
+            --env HF_HUB_OFFLINE=1 \
+            --env HF_DATASETS_OFFLINE=1 \
+            --env UPKINSEY_REQUIRE_BASIC_AUTH=1 \
+            --env UPKINSEY_BASIC_AUTH_USER=ci-operator \
+            --env UPKINSEY_BASIC_AUTH_PASSWORD=ci-only-password-not-a-secret \
+            upkinsey:ci
+      - name: Verify container health, authentication, and browser assets
+        run: |
+          python3 - <<'PY'
+          import base64
+          import json
+          import time
+          import urllib.error
+          import urllib.request
+
+          base_url = "http://127.0.0.1:15173"
+
+          class NoRedirects(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          # Never route this local-only smoke test through a proxy or redirect.
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects())
+
+          def request(path, *, method="GET", authenticated=False, timeout=2):
+              headers = {}
+              if authenticated:
+                  # Public, disposable test fixtures, not deployment credentials.
+                  token = base64.b64encode(b"ci-operator:ci-only-password-not-a-secret").decode("ascii")
+                  headers["Authorization"] = f"Basic {token}"
+              req = urllib.request.Request(base_url + path, headers=headers, method=method)
+              try:
+                  response = opener.open(req, timeout=timeout)
+              except urllib.error.HTTPError as exc:
+                  response = exc
+              with response:
+                  return response.status, response.headers, response.read()
+
+          deadline = time.monotonic() + 30
+          while True:
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  raise SystemExit("Container did not become ready within 30 seconds")
+              try:
+                  status, _, body = request("/api/health", timeout=min(2, remaining))
+                  break
+              except OSError:
+                  time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+
+          assert status == 200, f"Health status: {status}"
+          health = json.loads(body)
+          assert health["ok"] is False, "Smoke container must have no live API key"
+          assert health["auth_required"] is True
+          assert health["auth_configured"] is True
+
+          for method in ("GET", "HEAD"):
+              status, headers, body = request("/Resonance.html", method=method)
+              assert status == 401, f"Unauthenticated {method}: {status}"
+              assert headers.get("WWW-Authenticate", "").startswith("Basic ")
+              if method == "HEAD":
+                  assert body == b"", "HEAD must not send a response body"
+
+          for path, marker in (("/Resonance.html", b"research-ui.js"), ("/research-ui.js", b"UpkinseyUI")):
+              status, _, body = request(path, authenticated=True)
+              assert status == 200, f"Authenticated {path}: {status}"
+              assert marker in body, f"Missing expected browser asset content: {path}"
+
+          print("Container smoke passed: no-key health, GET/HEAD auth, HTML and shared helper")
+          PY
+      - name: Show container logs on failure
+        if: failure() && steps.start_container.outcome == 'success'
+        run: docker logs upkinsey-ci-smoke
+      - name: Stop the smoke container
+        if: always() && steps.start_container.outcome == 'success'
+        run: docker stop --time 10 upkinsey-ci-smoke
 
   package:
     name: Build and install package
