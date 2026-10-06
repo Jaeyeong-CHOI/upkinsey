@@ -7,6 +7,7 @@ and only aggregates after all independent persona calls return.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -71,18 +72,21 @@ PERSONA_RESPONSE_SCHEMA = """
 
 def _extract_json(text: str) -> dict[str, Any]:
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.S)
         if not match:
             raise
-        return json.loads(match.group(0))
+        data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise ValueError("Model response must be a JSON object")
+    return data
 
 
 def _as_int(value: Any, *, default: int = 0, min_value: int = 0, max_value: int = 100) -> int:
     try:
         parsed = int(round(float(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         parsed = default
     return max(min_value, min(max_value, parsed))
 
@@ -823,10 +827,10 @@ def _persona_evidence_card(reaction: dict[str, Any], role: str) -> dict[str, Any
     question = _first_text(reaction.get("next_validation_question"), "이 반응이 실제 다음 행동으로 이어지는 조건은 무엇인가?")
 
     if role == "supporter":
-        signal = f"{persona}는 {driver} 때문에 {adoption}% 채택 의향을 보였고, {objection}은 확인해야 합니다."
+        signal = f"{persona}는 {driver} 때문에 {adoption}/100 채택 의향을 보였고, {objection}은 확인해야 합니다."
         probe = f"{driver}가 실제 가입/결제 행동까지 이어지는지 확인"
     elif role == "barrier":
-        signal = f"{persona}는 {objection} 때문에 {adoption}% 수준에 머물렀습니다."
+        signal = f"{persona}는 {objection} 때문에 {adoption}/100 수준에 머물렀습니다."
         probe = f"{objection}이 비사용 이유인지, 어떤 증거가 있으면 완화되는지 확인"
     else:
         signal = f"{persona}의 다음 검증 질문: {question}"
@@ -910,7 +914,7 @@ def build_persona_evidence_pack(reactions: list[dict[str, Any]], limit: int = 3)
     avg_adoption = round(sum(_as_int(reaction.get("adoption_likelihood"), default=0) for reaction in reactions) / len(reactions))
     return {
         "summary": (
-            f"평균 채택 의향 {avg_adoption}% 뒤의 대표 반응: "
+            f"평균 채택 의향 {avg_adoption}/100 뒤의 대표 반응: "
             f"supporter {len(supporters)}명, barrier {len(barriers)}명, follow-up {len(followups)}개."
         ),
         "supporter_cards": [_persona_evidence_card(reaction, "supporter") for reaction in supporters],
@@ -989,11 +993,11 @@ def build_intent_cohort_contrast(reactions: list[dict[str, Any]]) -> dict[str, A
     summary_parts: list[str] = []
     if strongest:
         summary_parts.append(
-            f"Strongest signal: {strongest['label']} ({strongest['avg_adoption']}% avg adoption)"
+            f"Strongest signal: {strongest['label']} ({strongest['avg_adoption']}/100 avg adoption)"
         )
     if weakest:
         summary_parts.append(
-            f"Weakest signal: {weakest['label']} ({weakest['avg_adoption']}% avg adoption)"
+            f"Weakest signal: {weakest['label']} ({weakest['avg_adoption']}/100 avg adoption)"
         )
     if adoption_gap >= 20:
         summary_parts.append("Average score hides a large intent gap; compare cohort drivers before changing the product.")
@@ -1333,8 +1337,8 @@ def build_decision_board(
         rationale = "현재 synthetic 결과만으로는 명확한 다음 결정을 내리기 어렵습니다."
 
     criteria = [
-        f"avg adoption {adoption}%",
-        f"avg need fit {need_fit}%",
+        f"avg adoption {adoption}/100",
+        f"avg need fit {need_fit}/100",
         f"high-intent personas {high_intent}/{len(reactions)}",
         f"high price/trust friction {high_price_risk}/{len(reactions)}",
         f"brief quality {brief_score}/100",
@@ -1568,7 +1572,7 @@ def build_assumption_stress_test(
             "assumption": f"{target_market}이(가) {product_name}의 핵심 효용을 실제 문제 해결로 느낀다.",
             "risk_level": severity_label(value_score),
             "why_it_matters": "필요 적합도는 높아도 채택 의향이 따라오지 않으면 메시지보다 문제/해결 가설이 흔들릴 수 있습니다.",
-            "synthetic_signal": f"avg adoption {adoption}%, avg need fit {need_fit}%, low/conditional intent {low_intent}/{len(reactions)}",
+            "synthetic_signal": f"avg adoption {adoption}/100, avg need fit {need_fit}/100, low/conditional intent {low_intent}/{len(reactions)}",
             "falsification_test": "타깃 5명에게 제품 설명 전 최근 문제 상황을 묻고, 설명 후 다음 행동(가입/데모/인터뷰)을 실제로 선택하게 하기",
             "pass_signal": "5명 중 3명 이상이 최근 문제를 구체적으로 말하고 다음 행동을 선택",
             "source_signal": f"adoption={adoption}; need_fit={need_fit}",
@@ -3001,7 +3005,7 @@ def build_research_type_lens(
             "Pricing sensitivity lens",
             "price_resistance + friction-adjusted adoption",
             "Pricing sensitivity lab",
-            f"평균 채택 {adoption}%에서 가격 저항이 {pricing_sensitivity.get('overall_price_risk', 'Medium')}로 나타납니다.",
+            f"평균 채택 {adoption}/100에서 가격 저항이 {pricing_sensitivity.get('overall_price_risk', 'Medium')}로 나타납니다.",
             price_probe,
         )
         card["supporting_sections"] = ["pricing_sensitivity", "objections", "validation_plan"]
@@ -3050,7 +3054,7 @@ def build_research_type_lens(
         "Concept test lens",
         "adoption likelihood + need fit",
         "Decision board",
-        f"평균 채택 {adoption}%, need fit {need_fit}%로 컨셉 이해/매력도를 먼저 판단합니다.",
+        f"평균 채택 {adoption}/100, need fit {need_fit}/100로 컨셉 이해/매력도를 먼저 판단합니다.",
         "채택/need fit이 높은 persona에게는 사용 맥락을, 낮은 persona에게는 이해 실패 지점을 확인",
     )
     card["supporting_sections"] = ["decision_board", "segment_recommendations", "validation_plan"]
@@ -3257,7 +3261,7 @@ def build_decision_sensitivity(
         "need_fit_band": need_fit_band,
         "go_thresholds": go_thresholds,
         "hold_thresholds": hold_thresholds,
-        "summary": f"{decision} decision sensitivity is {risk_level}: adoption {adoption_band['range'][0]}-{adoption_band['range'][1]}%, need-fit {need_fit_band['range'][0]}-{need_fit_band['range'][1]}% ({panel_note}).",
+        "summary": f"{decision} decision sensitivity is {risk_level}: adoption {adoption_band['range'][0]}-{adoption_band['range'][1]}/100, need-fit {need_fit_band['range'][0]}-{need_fit_band['range'][1]}/100 ({panel_note}).",
         "interpretation": interpretation,
         "recommended_action": recommended_action,
         "disclaimer": "Heuristic synthetic uncertainty band, not a statistical confidence interval or real-market forecast.",
@@ -3532,7 +3536,7 @@ def build_founder_decision_memo(
 
     return {
         "title": f"{product_name} founder decision memo",
-        "headline": f"Synthetic panel {persona_count}명 기준 adoption {adoption}%, need-fit {need_fit}% — decision은 {decision}입니다.",
+        "headline": f"Synthetic panel {persona_count}명 기준 adoption {adoption}/100, need-fit {need_fit}/100 — decision은 {decision}입니다.",
         "decision": decision,
         "recommendation": recommendation,
         "why_it_may_work": driver,
@@ -3552,7 +3556,7 @@ def build_founder_decision_memo(
         "copy_paste_summary": " ".join(
             [
                 f"{product_name}: {decision}.",
-                f"근거는 {adoption}% adoption / {need_fit}% need-fit, 핵심 driver는 {driver}.",
+                f"근거는 {adoption}/100 adoption / {need_fit}/100 need-fit, 핵심 driver는 {driver}.",
                 f"가장 먼저 깨볼 리스크는 {risk}.",
                 f"다음 gate: {decision_gate}",
             ]
@@ -3568,6 +3572,8 @@ def validate_brief(brief: dict[str, Any]) -> dict[str, Any]:
 
     def text_field(name: str, default: str = "") -> str:
         value = brief.get(name, default)
+        if value is None:
+            return default
         if isinstance(value, list):
             value = ", ".join(str(item) for item in value)
         return str(value).strip()[:2000]
@@ -3641,6 +3647,15 @@ def simulate_persona_reaction(
         timeout=90,
     )
     data = _extract_json(text)
+    # A malformed model response is a failed call, not a plausible default score.
+    for field in ("understanding_score", "need_fit_score", "adoption_likelihood"):
+        value = data.get(field)
+        try:
+            score = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"Model response {field} must be a number between 0 and 100") from None
+        if isinstance(value, bool) or not math.isfinite(score) or not 0 <= score <= 100:
+            raise ValueError(f"Model response {field} must be a number between 0 and 100")
     return {
         "name": str(data.get("name") or persona.get("name") or "Persona"),
         "meta": str(data.get("meta") or persona_meta(persona)),
@@ -3725,6 +3740,8 @@ def format_report_markdown(brief: dict[str, Any], aggregate: dict[str, Any]) -> 
         "",
         "## Executive summary",
         "",
+        "Scores are model-generated 0–100 ratings, not purchase probabilities or statistical confidence.",
+        "",
         _markdown_escape(report.get("executive_summary") or "Synthetic market pre-research result."),
         "",
         "## Product brief",
@@ -3736,8 +3753,8 @@ def format_report_markdown(brief: dict[str, Any], aggregate: dict[str, Any]) -> 
         "",
         "## Signal board",
         "",
-        f"- Adoption likelihood: {aggregate.get('adoption_score', '-')}%",
-        f"- Need fit: {aggregate.get('need_fit_score', '-')}%",
+        f"- Adoption likelihood: {aggregate.get('adoption_score', '-')}/100",
+        f"- Need fit: {aggregate.get('need_fit_score', '-')}/100",
         f"- Price risk: {_markdown_escape(aggregate.get('price_risk', '-'))}",
         f"- Brief quality: {brief_quality.get('score', '-')} / 100 ({_markdown_escape(brief_quality.get('verdict', '-'))})",
         f"- Evidence quality: {evidence_quality.get('score', '-')} / 100 ({_markdown_escape(evidence_quality.get('level', '-'))}, {_markdown_escape(evidence_quality.get('confidence', '-'))} confidence)",
@@ -3981,7 +3998,7 @@ def format_report_markdown(brief: dict[str, Any], aggregate: dict[str, Any]) -> 
                         [
                             _markdown_escape(option.get("option", "")),
                             _markdown_escape(option.get("test_role", "")),
-                            _markdown_escape(f"{option.get('estimated_adoption_after_friction', '-')}%"),
+                            _markdown_escape(f"{option.get('estimated_adoption_after_friction', '-')}/100"),
                             _markdown_escape(option.get("recommended_probe", "")),
                         ]
                     )
@@ -4033,7 +4050,7 @@ def format_report_markdown(brief: dict[str, Any], aggregate: dict[str, Any]) -> 
                     [
                         _markdown_escape(segment.get("segment", "검증 타깃")),
                         _markdown_escape(segment.get("persona_count", 0)),
-                        _markdown_escape(f"{segment.get('avg_adoption', '-')}%"),
+                        _markdown_escape(f"{segment.get('avg_adoption', '-')}/100"),
                         _markdown_escape(segment.get("primary_objection", "")),
                         _markdown_escape(segment.get("validation_action", "")),
                     ]
@@ -4065,7 +4082,7 @@ def format_report_markdown(brief: dict[str, Any], aggregate: dict[str, Any]) -> 
                         [
                             _markdown_escape(cohort.get("label", cohort.get("cohort", "cohort"))),
                             _markdown_escape(cohort.get("persona_count", 0)),
-                            _markdown_escape(f"{cohort.get('avg_adoption', '-')}%"),
+                            _markdown_escape(f"{cohort.get('avg_adoption', '-')}/100"),
                             _markdown_escape(", ".join(_listify(cohort.get("shared_drivers"))[:3]) or "n/a"),
                             _markdown_escape(", ".join(_listify(cohort.get("shared_objections"))[:3]) or "n/a"),
                             _markdown_escape(cohort.get("validation_focus", "")),
@@ -4095,7 +4112,7 @@ def format_report_markdown(brief: dict[str, Any], aggregate: dict[str, Any]) -> 
                         [
                             _markdown_escape(participant.get("label", participant.get("role", ""))),
                             _markdown_escape(", ".join(_listify(participant.get("personas"))) or "n/a"),
-                            _markdown_escape(f"{participant.get('avg_adoption', '-')}%"),
+                            _markdown_escape(f"{participant.get('avg_adoption', '-')}/100"),
                             _markdown_escape(", ".join(_listify(participant.get("common_objections"))[:3]) or "n/a"),
                         ]
                     )
@@ -4341,7 +4358,7 @@ def format_report_markdown(brief: dict[str, Any], aggregate: dict[str, Any]) -> 
             lines += [
                 "Synthetic baseline:",
                 f"- Personas: {_markdown_escape(baseline.get('persona_count', '-'))}",
-                f"- Adoption / need-fit: {_markdown_escape(baseline.get('adoption_score', '-'))}% / {_markdown_escape(baseline.get('need_fit_score', '-'))}%",
+                f"- Adoption / need-fit: {_markdown_escape(baseline.get('adoption_score', '-'))}/100 / {_markdown_escape(baseline.get('need_fit_score', '-'))}/100",
                 f"- Positive-intent share: {_markdown_escape(baseline.get('positive_intent_share', '-'))}%",
                 f"- Top objections: {_markdown_escape(', '.join(_listify(baseline.get('top_objections'))[:5]) or 'n/a')}",
                 "",
@@ -4494,8 +4511,8 @@ def format_report_markdown(brief: dict[str, Any], aggregate: dict[str, Any]) -> 
                     [
                         _markdown_escape(_segment_persona_label(reaction)),
                         _markdown_escape(reaction.get("stance", "")),
-                        _markdown_escape(f"{reaction.get('adoption_likelihood', '-')}%"),
-                        _markdown_escape(f"{reaction.get('need_fit_score', '-')}%"),
+                        _markdown_escape(f"{reaction.get('adoption_likelihood', '-')}/100"),
+                        _markdown_escape(f"{reaction.get('need_fit_score', '-')}/100"),
                         _markdown_escape(reaction.get("concern", "")),
                     ]
                 )
@@ -4723,7 +4740,7 @@ def aggregate_market_research(
         ],
         "persona_reactions": reactions,
         "report": {
-            "executive_summary": f"{product_name}은(는) 합성 페르소나 기준 평균 채택 가능성 {adoption}%로 나타났으며, 실제 출시 전 가격 저항과 신뢰 형성 메시지를 우선 검증해야 합니다.",
+            "executive_summary": f"{product_name}은(는) 합성 페르소나 기준 평균 채택 가능성 {adoption}/100로 나타났으며, 실제 출시 전 가격 저항과 신뢰 형성 메시지를 우선 검증해야 합니다.",
             "positive_drivers": unique_top(drivers) or ["생활 문제를 직접 해결하는 실용성"],
             "top_risks": unique_top_risks(risks) or ["가격 저항과 신뢰 부족"],
             "objections": objections,
@@ -4796,8 +4813,10 @@ def simulate_market_research(
     additional model call after the parallel batch.
     """
 
-    client = client or UpstageClient()
     normalized_brief = validate_brief(brief)
+    if personas is not None and not personas:
+        raise ValueError("personas must contain at least one persona")
+    client = client or UpstageClient()
     inferred_filters = infer_persona_filters_from_brief(normalized_brief)
     if inferred_filters:
         normalized_brief = {
@@ -4856,7 +4875,7 @@ def simulate_market_research(
         progress_callback(
             {
                 "stage": "aggregation",
-                "message": "100명 응답을 집계하고 리포트를 구성 중",
+                "message": f"{len(reactions)}명 응답을 집계하고 리포트를 구성 중",
                 "completed": len(reactions),
                 "total": len(selected_personas),
             }
@@ -4870,13 +4889,34 @@ def simulate_market_research(
     )
     if persona_failures:
         result["partial_failures"] = persona_failures[:20]
-        result.setdefault("request_budget", {})["failed_persona_calls"] = len(persona_failures)
-        result.setdefault("request_plan", {})["failed_persona_calls"] = len(persona_failures)
-        result.setdefault("report", {}).setdefault("request_budget", result.get("request_budget", {}))["failed_persona_calls"] = len(persona_failures)
+        budget = build_request_budget(normalized_brief, persona_count=len(selected_personas), max_parallel_requests=workers)
+        budget.update({
+            "actual_persona_count": len(reactions),
+            "attempted_persona_calls": len(selected_personas),
+            "successful_persona_calls": len(reactions),
+            "failed_persona_calls": len(persona_failures),
+        })
+        budget["warnings"] = unique_top([
+            "Call counts are logical persona requests; provider retries may incur additional calls and cost.",
+            *budget.get("warnings", []),
+        ], limit=5)
+        result["request_budget"] = budget
+        result["request_plan"].update({
+            "estimated_total_model_calls": budget["estimated_total_model_calls"],
+            "planned_batches": budget["planned_batches"],
+            "max_parallel_requests": budget["max_parallel_requests"],
+            "attempted_persona_calls": len(selected_personas),
+            "failed_persona_calls": len(persona_failures),
+            "request_budget_warnings": budget["warnings"],
+        })
+        result["report"]["request_budget"] = budget
         warning = f"{len(persona_failures)} persona API calls failed; aggregate uses {len(reactions)} successful responses."
         evidence = result.setdefault("evidence_quality", {})
-        evidence["warnings"] = unique_top(_listify(evidence.get("warnings")) + [warning], limit=8)
+        # Put incomplete-panel evidence first so it survives warning limits.
+        evidence["warnings"] = unique_top([warning] + _listify(evidence.get("warnings")), limit=8)
         result.setdefault("report", {}).setdefault("evidence_quality", evidence)["warnings"] = evidence["warnings"]
+        result["report_markdown"] = format_report_markdown(normalized_brief, result)
+        result["report"]["markdown"] = result["report_markdown"]
     return result
 
 

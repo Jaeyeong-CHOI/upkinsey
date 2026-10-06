@@ -535,7 +535,15 @@ class MarketResearchTests(unittest.TestCase):
         self.assertEqual(len(result["persona_reactions"]), 1)
         self.assertEqual(len(result["partial_failures"]), 1)
         self.assertEqual(result["request_budget"]["failed_persona_calls"], 1)
+        self.assertEqual(result["request_budget"]["solar_persona_calls"], 2)
+        self.assertEqual(result["request_budget"]["estimated_total_model_calls"], 2)
+        self.assertEqual(result["request_budget"]["actual_persona_count"], 1)
+        self.assertEqual(result["report"]["request_budget"], result["request_budget"])
         self.assertTrue(any("failed" in warning.lower() for warning in result["evidence_quality"]["warnings"]))
+        self.assertIn("1 persona API calls failed", result["report_markdown"])
+        self.assertEqual(result["report_markdown"], result["report"]["markdown"])
+        self.assertIn("not purchase probabilities", result["report_markdown"])
+        self.assertIn("/100", result["report"]["executive_summary"])
 
     def test_build_persona_panel_profile_surfaces_target_coverage(self):
         personas = [
@@ -627,7 +635,7 @@ class MarketResearchTests(unittest.TestCase):
         )
 
         self.assertEqual(memo["decision"], "Refine")
-        self.assertIn("adoption 60%", memo["headline"])
+        self.assertIn("adoption 60/100", memo["headline"])
         self.assertEqual(memo["why_it_may_work"], "답글 시간 절약")
         self.assertEqual(memo["primary_kill_risk"], "AI 답글 품질 신뢰 부족")
         self.assertIn("10명 인터뷰", memo["decision_gate"])
