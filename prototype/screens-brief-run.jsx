@@ -107,9 +107,9 @@ function BriefScreen({ brief, setBrief, goNext, onParseDocument = null, parseSta
             <span className="card-tag">1단계</span>
             <div className="card-head-main">
               <div className="card-title">제품 정보</div>
-              <div className="card-sub">최소 3개 항목만 채워도 시작할 수 있어요. 많이 채울수록 결과가 정확해집니다.</div>
+              <div className="card-sub">최소 3개 항목만 채워도 시작할 수 있어요. 구체적으로 적으면 검증할 가설을 정리하기 쉬워요.</div>
             </div>
-            <input ref={fileInputRef} type="file" accept="application/pdf,.pdf" style={{ display: "none" }} onChange={handlePdfUpload} />
+            <input ref={fileInputRef} type="file" aria-label="제품 소개 PDF 업로드" accept="application/pdf,.pdf" style={{ display: "none" }} onChange={handlePdfUpload} />
             <button className="ai-import-btn" onClick={triggerUpload} disabled={!onParseDocument || parseStatus?.state === "uploading"} title="PDF를 업로드하면 Upstage Document Parse API가 제품 정보를 자동으로 채웁니다.">
               <span className="ai-spark">✦</span>
               {parseStatus?.state === "uploading" ? "AI 분석 중" : "AI로 PDF 채우기"}
@@ -136,73 +136,73 @@ function BriefScreen({ brief, setBrief, goNext, onParseDocument = null, parseSta
           )}
           <div className="card-body">
             <div className="field">
-              <label className="field-label">
+              <label className="field-label" htmlFor="brief-product-name">
                 제품 이름 <span className="req">*</span>
                 <span className="field-help">고객에게 그대로 보여줘도 부끄럽지 않을 이름이면 좋아요.</span>
               </label>
               <input className="input" placeholder="예) AI 식단 코치 앱"
-                     value={brief.productName} onChange={e => update("productName", e.target.value)} />
+                     id="brief-product-name" value={brief.productName} onChange={e => update("productName", e.target.value)} />
             </div>
 
             <div className="field">
-              <label className="field-label">
+              <label className="field-label" htmlFor="brief-description">
                 한 줄 설명 <span className="req">*</span>
                 <span className="field-help">‘누구의 어떤 문제를, 어떻게'가 한 문장에 들어가면 충분합니다.</span>
               </label>
               <textarea className="textarea" rows="3"
                         placeholder="예) 혼자 사시는 어르신의 외로움을, 강아지처럼 반응하는 가정용 로봇이 매일 교감으로 채워드립니다."
-                        value={brief.description} onChange={e => update("description", e.target.value)} />
+                        id="brief-description" value={brief.description} onChange={e => update("description", e.target.value)} />
             </div>
 
             <div className="grid-2">
               <div className="field">
-                <label className="field-label">
+                <label className="field-label" htmlFor="brief-features">
                   핵심 기능
                   <span className="field-help">3~5개. 한 줄에 하나씩 입력해주세요. 붙여넣기는 쉼표도 인식합니다.</span>
                 </label>
                 <textarea className="textarea compact-textarea list-textarea" rows="5" placeholder={"예) 음성 대화\n건강 알림\n가족 화상"}
-                          value={featuresText}
+                          id="brief-features" value={featuresText}
                           onChange={e => updateList("features", e.target.value)} />
               </div>
 
               <div className="field">
-                <label className="field-label">
+                <label className="field-label" htmlFor="brief-pricing">
                   가격 옵션
                   <span className="field-help">가격의 쉼표(30,000원)는 그대로 두고, 옵션은 엔터로 구분해주세요.</span>
                 </label>
                 <textarea className="textarea compact-textarea list-textarea" rows="3" placeholder={"예) 월 39,000원\n본체 290,000원"}
-                          value={pricingText}
+                          id="brief-pricing" value={pricingText}
                           onChange={e => updateList("pricing", e.target.value)} />
               </div>
             </div>
 
             <div className="field">
-              <label className="field-label">
+              <label className="field-label" htmlFor="brief-target">
                 누구를 위한 제품인가요?
                 <span className="field-help">나이대, 지역, 직업, 생활 맥락을 한 문장에 담아주세요.</span>
               </label>
               <input className="input" placeholder="예) 자녀와 떨어져 사는 60~75세 1인 가구"
-                     value={brief.target} onChange={e => update("target", e.target.value)} />
+                     id="brief-target" value={brief.target} onChange={e => update("target", e.target.value)} />
             </div>
 
             <div className="field">
-              <label className="field-label">
+              <label className="field-label" htmlFor="brief-alternatives">
                 지금 사용자는 이 문제를 어떻게 해결하고 있나요?
                 <span className="field-help">대안을 적어주시면, 응답자가 ‘이 제품을 왜 굳이?'라고 비교할 수 있어요.</span>
               </label>
               <textarea className="textarea" rows="2"
                         placeholder="예) AI 스피커, TV, 자녀의 안부 전화, 노인복지관 프로그램"
-                        value={brief.alternatives} onChange={e => update("alternatives", e.target.value)} />
+                        id="brief-alternatives" value={brief.alternatives} onChange={e => update("alternatives", e.target.value)} />
             </div>
 
             <div className="field">
-              <label className="field-label">
+              <label className="field-label" htmlFor="brief-hypothesis">
                 이번 실행으로 확인하고 싶은 가설
                 <span className="field-help">답을 얻고 싶은 한 가지 질문을 적어주세요. 비워둬도 괜찮습니다.</span>
               </label>
               <textarea className="textarea" rows="2"
                         placeholder="예) 월 구독 모델이 단발 결제보다 가입률이 높을 것이다"
-                        value={brief.hypothesis} onChange={e => update("hypothesis", e.target.value)} />
+                        id="brief-hypothesis" value={brief.hypothesis} onChange={e => update("hypothesis", e.target.value)} />
             </div>
 
             <div className="row between" style={{ marginTop: 24 }}>
@@ -322,7 +322,7 @@ function RunScreen({ brief, onRun, goBack, running = false, progress = null }) {
       <div className="page-head">
         <div className="page-eyebrow">2단계 · 시뮬레이션 실행</div>
         <h1 className="page-title">합성 응답자가<br /><em>당신의 제품을 처음 듣습니다</em></h1>
-        <p className="page-sub">전국 분포에서 샘플링된 가상 응답자가 제품 소개를 받아 읽고, 자기 입장에서 솔직한 반응을 돌려줘요. 무엇을 검증할지 한 가지만 골라주세요.</p>
+        <p className="page-sub">한국형 합성 페르소나 패널을 바탕으로 모델이 제품 반응을 생성해요. 실제 고객의 응답은 아닙니다. 무엇을 검증할지 한 가지만 골라주세요.</p>
       </div>
 
       <div className="card">
@@ -334,17 +334,17 @@ function RunScreen({ brief, onRun, goBack, running = false, progress = null }) {
           </div>
         </div>
         <div className="card-body">
-          <div className="test-grid">
+          <div className="test-grid" role="group" aria-label="시뮬레이션 모드">
             {TESTS.map(t => (
-              <div key={t.id}
+              <button type="button" key={t.id} aria-pressed={test === t.id}
                    className={"test-card" + (test === t.id ? " active" : "")}
                    onClick={() => setTest(t.id)}>
-                <div className="test-name">
+                <span className="test-name">
                   <span className="test-num">{t.num}</span>
                   {t.name}
-                </div>
-                <div className="test-desc">{t.desc}</div>
-              </div>
+                </span>
+                <span className="test-desc">{t.desc}</span>
+              </button>
             ))}
           </div>
 
@@ -355,30 +355,30 @@ function RunScreen({ brief, onRun, goBack, running = false, progress = null }) {
 
           <div className="run-config">
             <div className="config-block">
-              <div className="config-label">패널 규모 (응답자 수)</div>
+              <label className="config-label" htmlFor="run-sample-size">패널 규모 (합성 응답 수)</label>
               <div className="config-val">{sampleSize}<span className="unit">명</span></div>
               <div className="slider-row">
-                <input type="range" min="4" max="100" step="2" value={sampleSize}
+                <input id="run-sample-size" type="range" min="4" max="100" step="2" value={sampleSize}
                        className="slider"
                        style={{ "--pct": (((sampleSize - 4) / 96) * 100) + "%" }}
                        onChange={e => setSampleSize(Number(e.target.value))} />
                 <span className="dim" style={{ fontSize: 12, minWidth: 50, textAlign: "right" }}>4~100명</span>
               </div>
-              <div className="config-hint">기본 8명이면 빠르게 신호를 봐요. 정밀 검증은 24명 이상.</div>
+              <div className="config-hint">기본은 8개 합성 응답입니다. 패널이 커지면 API 비용과 실행 시간이 늘어납니다.</div>
             </div>
             <div className="config-block">
-              <div className="config-label">샘플링 시드</div>
+              <label className="config-label" htmlFor="run-seed">샘플링 시드</label>
               <div className="config-val">{seed}</div>
               <div className="slider-row">
                 <input className="input" style={{ padding: "8px 14px" }}
-                       value={seed} type="number"
+                       id="run-seed" value={seed} type="number"
                        onChange={e => setSeed(Number(e.target.value || 0))} />
                 <button className="btn-ghost" style={{ padding: "8px 14px", fontSize: 12 }}
                         onClick={() => setSeed(Math.floor(Math.random() * 9999))}>
                   랜덤
                 </button>
               </div>
-              <div className="config-hint">같은 시드면 같은 응답자가 다시 응답해요. 비교 실험할 때 유용해요.</div>
+              <div className="config-hint">같은 데이터·필터·시드로 패널 선택을 반복할 수 있어요. 모델의 응답까지 같아지는 것은 아닙니다.</div>
             </div>
           </div>
 
@@ -391,7 +391,7 @@ function RunScreen({ brief, onRun, goBack, running = false, progress = null }) {
             <div>
               <div className="dataset-name">한국인 페르소나 데이터셋 활용</div>
               <div className="dataset-desc">
-                이름·지역·나이·직업·가족 구성이 실제 통계 분포를 따라요 (nvidia/Nemotron-Personas-Korea)
+                nvidia/Nemotron-Personas-Korea에서 패널을 구성합니다. 선택된 패널의 인구 대표성은 보장하지 않습니다.
               </div>
             </div>
           </div>
@@ -400,9 +400,9 @@ function RunScreen({ brief, onRun, goBack, running = false, progress = null }) {
             <div className="cta-meta">
               <span><b>{sampleSize}명</b> 응답</span>
               <span>·</span>
-              <span>예상 시간 <b>약 {Math.max(8, Math.round(sampleSize * 1.4))}초</b></span>
+              <span>실행 시간은 모델 응답과 재시도에 따라 달라집니다</span>
               <span>·</span>
-              <span>검증 가드레일 3개</span>
+              <span>실제 고객 검증 전 가설 탐색용</span>
             </div>
             <div className="row">
               <button className="btn" onClick={goBack}>

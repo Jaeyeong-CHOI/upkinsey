@@ -2823,3 +2823,12 @@ body {
 textarea.list-textarea[rows="3"] {
   min-height: 74px;
 }
+
+/* Native mode controls preserve the visual treatment and expose keyboard focus. */
+button.test-card { color: var(--text); font: inherit; text-align: left; }
+button.test-card:focus-visible,
+button:focus-visible,
+a:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 4px; }
+.live-dot[data-status="checking"] { background: var(--text-4); }
+.live-dot[data-status="busy"] { background: var(--accent-bright); }
+.live-dot[data-status="error"] { background: var(--neu); }

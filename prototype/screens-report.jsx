@@ -68,7 +68,7 @@ function surveyQuestionText(item) {
 function ReportScreen({ goBack, goRestart, result = null, data = null }) {
   const [activeId, setActiveId] = useStateR("summary");
   const sectionRefs = useRefR({});
-  const signals = data?.signals || RESONANCE_DATA.signals;
+  const signals = data.signals;
   const report = result?.report || {};
   const evidence = report.evidence_quality || result?.evidence_quality || {};
   const budget = report.request_budget || result?.request_budget || {};
@@ -115,7 +115,7 @@ function ReportScreen({ goBack, goRestart, result = null, data = null }) {
     <div className="page" data-screen-label="06 Report">
       <div className="page-head">
         <div className="page-eyebrow">6단계 · 그래서 어떻게 할까요</div>
-        <h1 className="page-title">시뮬레이션이 끝났어요<br /><em>실제 결과만으로 리포트를 구성했어요</em></h1>
+        <h1 className="page-title">시뮬레이션이 끝났어요<br /><em>합성 응답으로 리포트를 구성했어요</em></h1>
         <p className="page-sub">{executiveSummary}</p>
       </div>
 
@@ -133,10 +133,10 @@ function ReportScreen({ goBack, goRestart, result = null, data = null }) {
             <h2 className="story-h">권장 액션은 <span style={{ color: "var(--accent-bright)" }}>{recommendation}</span>입니다.</h2>
             <p className="story-lead">{executiveSummary}</p>
             <div className="kpi-grid">
-              <div className="kpi"><div className="l">채택 의향</div><div className="v"><CountUp target={signals.adoption.value} suffix="%" /></div></div>
-              <div className="kpi"><div className="l">문제 적합도</div><div className="v"><CountUp target={signals.needFit.value} suffix="%" /></div></div>
+              <div className="kpi"><div className="l">채택 의향</div><div className="v">{signals.adoption.value == null ? "미제공" : <CountUp target={signals.adoption.value} suffix="점" />}</div></div>
+              <div className="kpi"><div className="l">문제 적합도</div><div className="v">{signals.needFit.value == null ? "미제공" : <CountUp target={signals.needFit.value} suffix="점" />}</div></div>
               <div className="kpi"><div className="l">가격 부담</div><div className="v accent">{signals.priceRisk.value}</div></div>
-              <div className="kpi"><div className="l">근거 신뢰도</div><div className="v warn">{evidence.score ?? signals.evidenceQuality.value}</div></div>
+              <div className="kpi"><div className="l">근거 점검 점수</div><div className="v warn">{evidence.score ?? signals.evidenceQuality.value}</div></div>
             </div>
           </section>
 
@@ -148,8 +148,8 @@ function ReportScreen({ goBack, goRestart, result = null, data = null }) {
               <div className="decision-eyebrow">권장 액션</div>
               <div className="decision-verdict">{recommendation}</div>
               <div className="decision-confidence">
-                <span>근거 신뢰도</span>
-                <div className="conf-bar"><div className="conf-bar-fill" style={{ width: `${Math.max(0, Math.min(100, Number(evidence.score ?? 50)))}%` }}></div></div>
+                <span>근거 점검 점수</span>
+                <div className="conf-bar"><div className="conf-bar-fill" style={{ width: `${Math.max(0, Math.min(100, Number(evidence.score ?? 0)))}%` }}></div></div>
                 <span style={{ color: "var(--accent-bright)" }}>{evidence.score ?? "-"} / 100</span>
                 <span className="dim">· {budget.actual_persona_count || signals.calls?.done || 0}명 응답 · 실패 {budget.failed_persona_calls || 0}건</span>
               </div>
@@ -158,7 +158,7 @@ function ReportScreen({ goBack, goRestart, result = null, data = null }) {
 
           <section className="story-section" ref={el => sectionRefs.current.evidence = el} data-sid="evidence">
             <div className="story-num">3. 데이터는 충분한가요?</div>
-            <h2 className="story-h">현재 신뢰도는 {evidence.level || "directional"}입니다.</h2>
+            <h2 className="story-h">현재 근거 점검 등급은 {evidence.level || "directional"}입니다.</h2>
             <div className="story-block">
               <div className="row between" style={{ marginBottom: 14 }}>
                 <span style={{ fontWeight: 500 }}>Evidence quality · {evidence.score ?? "-"}점</span>
