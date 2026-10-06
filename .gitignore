@@ -15,3 +15,5 @@ data/simulation_runs/*.json
 build/
 dist/
 .pytest_cache/
+frontend-dist/
+data/graph/

@@ -1,5 +1,5 @@
+import React from "react";
 /* 입력(Brief) + 실행(Run) screens */
-/* global React, RESONANCE_DATA */
 
 const { useState: useStateBR, useMemo: useMemoBR, useRef: useRefBR, useEffect: useEffectBR } = React;
 
@@ -425,4 +425,6 @@ function RunScreen({ brief, onRun, goBack, running = false, progress = null }) {
   );
 }
 
-Object.assign(window, { BriefScreen, RunScreen });
+
+
+export { BriefScreen, RunScreen };

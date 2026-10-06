@@ -1,11 +1,3 @@
-/* Shared browser/Node helpers: no network requests or DOM work at import time. */
-(function (root, factory) {
-  const api = factory();
-  if (typeof module === "object" && module.exports) module.exports = api;
-  else root.UpkinseyUI = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
-"use strict";
-
 const RESEARCH_TYPE_BY_MODE = {
   concept: "Concept test",
   pricing: "Pricing test",
@@ -199,5 +191,13 @@ function mapResultToResonance(result, brief, versions = []) {
 }
 
 
-return { asList, clamp, shortId, apiPath, priceKo, parseMeta, toBackendBrief, fromBackendBrief, canonicalBriefForHash, briefFingerprint, sleep, mapPersona, mapResultToResonance, readApiResponse, scoreLabel, personaBio };
-});
+// React exposes composition state on nativeEvent; WebKit may report keyCode 229
+// while an IME is confirming its final syllable. Neither should send a message.
+function shouldSubmitChatOnEnter(event) {
+  return event.key === "Enter" && !event.shiftKey
+    && !event.isComposing && !event.nativeEvent?.isComposing
+    && event.keyCode !== 229 && event.nativeEvent?.keyCode !== 229;
+}
+
+
+export { shouldSubmitChatOnEnter, asList, clamp, shortId, apiPath, priceKo, parseMeta, toBackendBrief, fromBackendBrief, canonicalBriefForHash, briefFingerprint, sleep, mapPersona, mapResultToResonance, readApiResponse, scoreLabel, personaBio };

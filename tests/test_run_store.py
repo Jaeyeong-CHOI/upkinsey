@@ -187,3 +187,27 @@ class RunStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunChronologyTests(unittest.TestCase):
+    def test_same_second_runs_follow_creation_time_not_random_id(self):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        class Clock:
+            ticks = 0
+            @classmethod
+            def now(cls, tz):
+                cls.ticks += 1
+                return datetime(2026, 10, 6, 12, 0, 0, cls.ticks, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('upstage_api_sim.run_store.datetime', Clock):
+                with patch('upstage_api_sim.run_store.uuid.uuid4', side_effect=[SimpleNamespace(hex='ffffffff'), SimpleNamespace(hex='00000000')]):
+                    first = save_simulation_run(directory, {'product_name': 'same'}, {})
+                    second = save_simulation_run(directory, {'product_name': 'same'}, {})
+            runs = list_simulation_runs(directory)
+            self.assertEqual(runs[0]['version_id'], second['summary']['version_id'])
+            comparison = compare_simulation_run(directory, second['summary']['version_id'])
+            self.assertEqual(comparison['baseline_version_id'], first['summary']['version_id'])
+            stored = json.loads(Path(second['path']).read_text())
+            self.assertEqual(stored['schema_version'], 1)

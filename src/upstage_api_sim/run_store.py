@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+RUN_SCHEMA_VERSION = 1
 RUN_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$")
 
 
@@ -173,9 +174,11 @@ def save_simulation_run(store_dir: str | Path, brief: dict[str, Any], result: di
 
     root = Path(store_dir)
     root.mkdir(parents=True, exist_ok=True)
-    created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    version_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+    created_at = now.isoformat()
+    version_id = f"{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
     run = {
+        "schema_version": RUN_SCHEMA_VERSION,
         "version_id": version_id,
         "created_at": created_at,
         "brief": brief,
@@ -188,21 +191,31 @@ def save_simulation_run(store_dir: str | Path, brief: dict[str, Any], result: di
     return {"summary": summarize_run(run), "path": str(path)}
 
 
+def _sorted_runs(root: Path) -> list[dict[str, Any]]:
+    """Sort by stored time, not the random suffix of same-second file names."""
+    entries = []
+    for path in root.glob("*.json"):
+        run = _load_run_file(path)
+        if run is None:
+            continue
+        try:
+            stamp = datetime.fromisoformat(str(run.get("created_at", "")).replace("Z", "+00:00"))
+            stamp = stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+            sort_time = stamp.timestamp()
+        except (ValueError, TypeError, OverflowError):
+            # Old/corrupt timestamps retain deterministic filename ordering.
+            sort_time = 0.0
+        entries.append((sort_time, path.name, run))
+    return [entry[2] for entry in sorted(entries, key=lambda entry: (entry[0], entry[1]), reverse=True)]
+
+
 def list_simulation_runs(store_dir: str | Path, *, limit: int = 50) -> list[dict[str, Any]]:
     """List recent saved simulation versions, newest first."""
 
     root = Path(store_dir)
     if not root.exists() or limit <= 0:
         return []
-    summaries: list[dict[str, Any]] = []
-    for path in sorted(root.glob("*.json"), reverse=True):
-        run = _load_run_file(path)
-        if run is None:
-            continue
-        summaries.append(summarize_run(run))
-        if len(summaries) >= limit:
-            break
-    return summaries
+    return [summarize_run(run) for run in _sorted_runs(root)[:limit]]
 
 
 def load_simulation_run(store_dir: str | Path, version_id: str) -> dict[str, Any]:
@@ -255,11 +268,7 @@ def compare_simulation_run(store_dir: str | Path, version_id: str, *, baseline_v
             raise ValueError("invalid_baseline_file")
         return compare_run_summaries(current_summary, summarize_run(baseline_run))
 
-    runs: list[dict[str, Any]] = []
-    for path in sorted(root.glob("*.json"), reverse=True):
-        run = _load_run_file(path)
-        if run is not None:
-            runs.append(run)
+    runs = _sorted_runs(root)
 
     current_index = next((index for index, run in enumerate(runs) if _safe_text(run.get("version_id")) == version_id), None)
     if current_index is None:

@@ -51,8 +51,14 @@ jobs:
         with:
           node-version: "22"
           package-manager-cache: false
-      - name: Run dependency-free frontend tests
-        run: node --test tests/frontend*.cjs
+      - name: Install locked build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build production browser assets
+        run: npm run build
+      - name: Run frontend regression tests
+        run: npm test
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
 
   docker:
     name: Docker build
@@ -83,6 +89,7 @@ jobs:
           python3 - <<'PY'
           import base64
           import json
+          import re
           import time
           import urllib.error
           import urllib.request
@@ -134,13 +141,31 @@ jobs:
               if method == "HEAD":
                   assert body == b"", "HEAD must not send a response body"
 
-          for path, marker in (("/Resonance.html", b"research-ui.js"), ("/research-ui.js", b"UpkinseyUI")):
-              status, _, body = request(path, authenticated=True)
-              assert status == 200, f"Authenticated {path}: {status}"
-              assert marker in body, f"Missing expected browser asset content: {path}"
-
-          print("Container smoke passed: no-key health, GET/HEAD auth, HTML and shared helper")
+          for page in ("/", "/Resonance.html"):
+              status, headers, body = request(page, authenticated=True)
+              assert status == 200, f"Authenticated {page}: {status}"
+              assert headers.get("Cache-Control") == "no-cache"
+              assert "script-src 'self'" in headers.get("Content-Security-Policy", "")
+              html = body.decode("utf-8")
+              assert "text/babel" not in html and "unpkg.com" not in html
+              assets = re.findall(r'(?:src|href)="(assets/[^\"]+\.(?:js|css))"', html)
+              assert len(assets) == 2, f"Expected local JS/CSS: {assets}"
+              for asset in assets:
+                  status, headers, data = request("/" + asset, authenticated=True)
+                  assert status == 200 and data, f"Missing {asset}"
+                  assert "immutable" in headers.get("Cache-Control", "")
+                  if asset.startswith("assets/app-") and asset.endswith(".js"):
+                      status, _, license_text = request("/" + asset + ".LEGAL.txt", authenticated=True)
+                      assert status == 200 and b"MIT" in license_text
+          for authenticated, expected in ((False, 401), (True, 200)):
+              assert request("/api/graph/summary", authenticated=authenticated)[0] == expected
+          print("Container smoke passed: no-key health, GET/HEAD auth, graph access, production assets and CSP")
           PY
+      - name: Verify non-root runtime and writable data directory
+        run: |
+          test "$(docker exec upkinsey-ci-smoke id -u)" = 10001
+          test "$(docker exec upkinsey-ci-smoke id -g)" = 10001
+          docker exec upkinsey-ci-smoke python -c "from pathlib import Path; p=Path('/app/data/.ci-write-probe'); p.write_text('ok')"
       - name: Show container logs on failure
         if: failure() && steps.start_container.outcome == 'success'
         run: docker logs upkinsey-ci-smoke
@@ -178,6 +203,13 @@ jobs:
               "upstage_api_sim.market_research",
               "upstage_api_sim.personas.io",
               "upstage_api_sim.personas.nemotron",
+              "upstage_api_sim.personas.sampling",
+              "upstage_api_sim.server",
+              "upstage_api_sim.graph_store",
+              "upstage_api_sim.provenance",
+              "upstage_api_sim.research_inputs",
+              "upstage_api_sim.report_markdown",
+              "upstage_api_sim.interview_planning",
               "upstage_api_sim.run_store",
               "upstage_api_sim.upstage_client",
           ):
@@ -185,3 +217,5 @@ jobs:
           from upstage_api_sim import __version__
           assert version("upstage-api-simulation") == __version__
           PY
+          "$RUNNER_TEMP/upkinsey-wheel/bin/upkinsey" --version
+          "$RUNNER_TEMP/upkinsey-wheel/bin/python" -I -m upstage_api_sim --help

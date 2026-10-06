@@ -8,7 +8,7 @@ Example:
 from __future__ import annotations
 
 import argparse
-import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,7 +17,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from upstage_api_sim.personas.nemotron import DATASET_ID, compact_persona_from_row  # noqa: E402
+from upstage_api_sim.personas.sampling import sample_personas, write_persona_sample  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +25,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n", type=int, default=10)
     parser.add_argument("--buffer-size", type=int, default=10_000)
+    parser.add_argument("--revision", default=os.environ.get("UPKINSEY_PERSONA_REVISION") or None,
+                        help="Requested dataset reference (a name such as main is mutable)")
     parser.add_argument("--output", type=Path, default=Path("data/personas/sample.jsonl"))
     return parser.parse_args()
 
@@ -32,43 +34,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:
-        raise SystemExit(
-            "Missing dependency: datasets. Install with `pip install -e '.[persona]'`."
-        ) from exc
-
-    stream = load_dataset(DATASET_ID, split="train", streaming=True)
-    sampled_rows = stream.shuffle(seed=args.seed, buffer_size=args.buffer_size).take(args.n)
-
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    sampled_uuids: list[str] = []
-    with args.output.open("w", encoding="utf-8") as f:
-        for row in sampled_rows:
-            compact = compact_persona_from_row(dict(row))
-            compact["sampling"] = {
-                "dataset_id": DATASET_ID,
-                "split": "train",
-                "seed": args.seed,
-                "buffer_size": args.buffer_size,
-                "method": "streaming_shuffle_take",
-            }
-            sampled_uuids.append(str(compact.get("uuid")))
-            f.write(json.dumps(compact, ensure_ascii=False) + "\n")
-
-    manifest = {
-        "dataset_id": DATASET_ID,
-        "split": "train",
-        "sampling_seed": args.seed,
-        "sample_size": args.n,
-        "buffer_size": args.buffer_size,
-        "sampling_method": "streaming_shuffle_take",
-        "output": str(args.output),
-        "sampled_uuids": sampled_uuids,
-    }
-    manifest_path = args.output.with_suffix(args.output.suffix + ".manifest.json")
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    records = sample_personas(sample_size=args.n, seed=args.seed, revision=args.revision, buffer_size=args.buffer_size)
+    manifest_path = write_persona_sample(args.output, records, sample_size=args.n, seed=args.seed,
+                                         revision=args.revision, buffer_size=args.buffer_size)
 
     print(f"wrote {args.output}")
     print(f"wrote {manifest_path}")

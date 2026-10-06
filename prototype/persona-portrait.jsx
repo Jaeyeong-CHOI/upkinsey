@@ -1,9 +1,9 @@
+import React from "react";
 /* Persona portrait SVG generator
    Stylized silhouette per persona — distinguishable but abstract.
    Each persona gets: hair shape (by age + gender), accessory (glasses/scarf/hat),
    subtle color tint matching their stance.
 */
-/* global React */
 
 const { useMemo: _useMemoPortrait } = React;
 
@@ -138,4 +138,5 @@ function PersonaPortrait({ id, size = 64, ring = null }) {
   );
 }
 
-window.PersonaPortrait = PersonaPortrait;
+
+export { PersonaPortrait };

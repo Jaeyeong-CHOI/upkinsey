@@ -1,5 +1,6 @@
+import { scoreLabel } from "./research-ui.js";
+import React from "react";
 /* 결과(Signals) — 한눈에 보는 시장 반응 */
-/* global React, RESONANCE_DATA */
 
 const { useState: useStateS, useEffect: useEffectS, useRef: useRefS } = React;
 
@@ -71,7 +72,7 @@ function SignalsScreen({ goNext, goBack, data = null, versions = null, result = 
   const V = versions || [];
   const report = result?.report || {};
   const decision = report.decision_board?.recommendation || report.decision_board?.decision || D.decision?.current || "다음 검증 필요";
-  const executiveSummary = report.executive_summary || `${D.calls?.done || 0}개 합성 응답 기준 채택 의향 ${window.UpkinseyUI.scoreLabel(D.adoption.value)}, 문제 적합도 ${window.UpkinseyUI.scoreLabel(D.needFit.value)}입니다.`;
+  const executiveSummary = report.executive_summary || `${D.calls?.done || 0}개 합성 응답 기준 채택 의향 ${scoreLabel(D.adoption.value)}, 문제 적합도 ${scoreLabel(D.needFit.value)}입니다.`;
 
   const [animKey, setAnimKey] = useStateS(0);
   useEffectS(() => { setAnimKey(k => k + 1); }, []);
@@ -195,8 +196,8 @@ function SignalsScreen({ goNext, goBack, data = null, versions = null, result = 
                     <div className="vc-id" title="실행 ID">#{v.shortId}</div>
                   </div>
                   <div className="vc-tags">
-                    <span className={"vc-tag" + (v.current ? " accent" : "")}>채택 의향 {window.UpkinseyUI.scoreLabel(v.adoption)}</span>
-                    <span className={"vc-tag" + (v.current ? " accent" : "")}>문제 적합도 {window.UpkinseyUI.scoreLabel(v.need)}</span>
+                    <span className={"vc-tag" + (v.current ? " accent" : "")}>채택 의향 {scoreLabel(v.adoption)}</span>
+                    <span className={"vc-tag" + (v.current ? " accent" : "")}>문제 적합도 {scoreLabel(v.need)}</span>
                     <span className="vc-tag">가격 부담 {v.price}</span>
                     <span className="vc-tag">→ {v.decision}</span>
                   </div>
@@ -220,7 +221,7 @@ function SignalsScreen({ goNext, goBack, data = null, versions = null, result = 
                 <div style={{ fontSize: 16, fontWeight: 500, letterSpacing: "-0.005em" }}>이번 실행의 해석 가드레일</div>
                 <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>현재 실행의 입력·패널 점검 결과입니다. 통계적 신뢰도나 예측 정확도가 아닙니다.</div>
               </div>
-              <div className="mono" style={{ fontSize: 13, color: "var(--accent-bright)" }}>근거 점검 점수 {window.UpkinseyUI.scoreLabel(D.evidenceQuality.value)}</div>
+              <div className="mono" style={{ fontSize: 13, color: "var(--accent-bright)" }}>근거 점검 점수 {scoreLabel(D.evidenceQuality.value)}</div>
             </div>
             <div className="diff-grid">
               <div className="diff-cell">
@@ -230,7 +231,7 @@ function SignalsScreen({ goNext, goBack, data = null, versions = null, result = 
               </div>
               <div className="diff-cell">
                 <div className="diff-label">근거 점검 점수</div>
-                <div className="diff-change">{window.UpkinseyUI.scoreLabel(D.evidenceQuality.value)}</div>
+                <div className="diff-change">{scoreLabel(D.evidenceQuality.value)}</div>
                 <div className="diff-delta same">경고 {D.warnings || 0}개</div>
               </div>
               <div className="diff-cell">
@@ -263,4 +264,5 @@ function SignalsScreen({ goNext, goBack, data = null, versions = null, result = 
   );
 }
 
-window.SignalsScreen = SignalsScreen;
+
+export { SignalsScreen };

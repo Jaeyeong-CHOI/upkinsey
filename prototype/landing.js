@@ -1,3 +1,7 @@
+import { DEMO_PERSONAS, DEMO_THOUGHTS } from "./data.js";
+import "./landing-base.css";
+import "./landing.css";
+
 /* 업킨지 앤 컴퍼니 — 랜딩 인터랙티브 (가벼운 hero 캔버스 + 스크롤 리빌) */
 
 (function() {
@@ -6,7 +10,7 @@
   if (hero) {
     const ctx = hero.getContext('2d');
     let W, H, dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const personas = window.RESONANCE_DATA?.personas || [];
+    const personas = DEMO_PERSONAS || [];
 
     function resize() {
       const rect = hero.getBoundingClientRect();
@@ -108,7 +112,7 @@
   /* ===== Hero thought rail ===== */
   const rail = document.getElementById('thought-rail');
   if (rail) {
-    const thoughts = (window.RESONANCE_DATA?.thoughts) || [
+    const thoughts = (DEMO_THOUGHTS) || [
       "응답자 패널을 생성하는 중…",
       "응답을 모으는 중…",
       "결과를 정리하는 중…"

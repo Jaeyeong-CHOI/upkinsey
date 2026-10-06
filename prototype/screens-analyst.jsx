@@ -1,5 +1,5 @@
+import React from "react";
 /* 분석가(Analyst) — persona 인터뷰 질문을 원질문에서 재설계 */
-/* global React */
 
 const { useState: useStateA } = React;
 
@@ -197,4 +197,5 @@ function AnalystScreen({ result, analystResult, onAsk, goBack, goNext }) {
   );
 }
 
-window.AnalystScreen = AnalystScreen;
+
+export { AnalystScreen };

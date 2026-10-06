@@ -1,5 +1,7 @@
+import { PersonaPortrait } from "./persona-portrait.jsx";
+import { scoreLabel, personaBio, shouldSubmitChatOnEnter } from "./research-ui.js";
+import React from "react";
 /* 응답자(Personas) — 별자리/카드 + 1대1 인터뷰 */
-/* global React, RESONANCE_DATA, PersonaPortrait */
 
 const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, useMemo: useMemoP } = React;
 
@@ -165,11 +167,13 @@ function Constellation({ personas, selectedId, onSelect }) {
         const arcColor = p.stance === "pos" ? "var(--pos)" : p.stance === "neg" ? "var(--neg)" : "var(--neu)";
 
         return (
-          <div key={p.id}
+          <button key={p.id} type="button"
+               aria-pressed={selectedId === p.id}
+               aria-label={`${p.name} 응답자 선택`}
                className={"persona-node" + (selectedId === p.id ? " selected" : "")}
                style={{ left: p.cx + "px", top: p.cy + "px" }}
                onClick={() => onSelect(p.id)}>
-            <div className="node-portrait" style={{ "--size": p.size + "px" }}>
+            <span className="node-portrait" style={{ "--size": p.size + "px" }}>
               <PersonaPortrait id={p.id} size={p.size} />
               <svg className="adoption-arc" viewBox={`0 0 ${p.size + 6} ${p.size + 6}`}>
                 <circle cx={(p.size + 6) / 2} cy={(p.size + 6) / 2} r={r}
@@ -178,12 +182,12 @@ function Constellation({ personas, selectedId, onSelect }) {
                         strokeLinecap="round"
                         transform={`rotate(-90 ${(p.size + 6) / 2} ${(p.size + 6) / 2})`} />
               </svg>
-            </div>
-            <div className="node-label">
-              <div className="node-name">{p.name}</div>
-              <div className="node-meta">{p.age == null ? "나이 미제공" : `${p.age}세`} · 채택 {window.UpkinseyUI.scoreLabel(p.adoption)}</div>
-            </div>
-          </div>
+            </span>
+            <span className="node-label">
+              <span className="node-name">{p.name}</span>
+              <span className="node-meta">{p.age == null ? "나이 미제공" : `${p.age}세`} · 채택 {scoreLabel(p.adoption)}</span>
+            </span>
+          </button>
         );
       })}
 
@@ -202,27 +206,29 @@ function PersonaCards({ personas, selectedId, onSelect }) {
   return (
     <div className="persona-cards">
       {personas.map(p => (
-        <div key={p.id}
+        <button key={p.id} type="button"
+             aria-pressed={selectedId === p.id}
+             aria-label={`${p.name} 응답자 선택`}
              className={"pcard" + (selectedId === p.id ? " selected" : "")}
              onClick={() => onSelect(p.id)}>
-          <div className="pcard-head">
-            <div>
+          <span className="pcard-head">
+            <span className="pcard-identity">
               <PersonaPortrait id={p.id} size={44} />
-              <div>
-                <div className="pcard-name">{p.name}</div>
-                <div className="pcard-bio">{window.UpkinseyUI.personaBio(p)}</div>
-              </div>
-            </div>
-          </div>
-          <div className="pcard-quote">"{p.stanceLabel}"</div>
-          <div className="pcard-meter">
+              <span>
+                <span className="pcard-name">{p.name}</span>
+                <span className="pcard-bio">{personaBio(p)}</span>
+              </span>
+            </span>
+          </span>
+          <span className="pcard-quote">"{p.stanceLabel}"</span>
+          <span className="pcard-meter">
             <span className="pcard-meter-label">채택 의향</span>
-            <div className="pcard-meter-bar">
-              <div className="pcard-meter-bar-fill" style={{ width: p.adoption + "%" }}></div>
-            </div>
-            <span className="pcard-meter-val">{window.UpkinseyUI.scoreLabel(p.adoption)}</span>
-          </div>
-        </div>
+            <span className="pcard-meter-bar">
+              <span className="pcard-meter-bar-fill" style={{ width: p.adoption + "%" }}></span>
+            </span>
+            <span className="pcard-meter-val">{scoreLabel(p.adoption)}</span>
+          </span>
+        </button>
       ))}
     </div>
   );
@@ -241,7 +247,7 @@ function PersonaDetail({ persona }) {
         <PersonaPortrait id={p.id} size={64} />
         <div>
           <div className="pd-name">{p.name}</div>
-          <div className="pd-bio">{window.UpkinseyUI.personaBio(p)}</div>
+          <div className="pd-bio">{personaBio(p)}</div>
         </div>
       </div>
 
@@ -250,9 +256,9 @@ function PersonaDetail({ persona }) {
       </div>
 
       <div className="pd-stats">
-        <div className="pd-stat"><div className="lbl">제품 이해도</div><div className="val">{window.UpkinseyUI.scoreLabel(p.understanding)}</div></div>
-        <div className="pd-stat"><div className="lbl">문제 적합도</div><div className="val">{window.UpkinseyUI.scoreLabel(p.need)}</div></div>
-        <div className="pd-stat"><div className="lbl">채택 의향</div><div className="val">{window.UpkinseyUI.scoreLabel(p.adoption)}</div></div>
+        <div className="pd-stat"><div className="lbl">제품 이해도</div><div className="val">{scoreLabel(p.understanding)}</div></div>
+        <div className="pd-stat"><div className="lbl">문제 적합도</div><div className="val">{scoreLabel(p.need)}</div></div>
+        <div className="pd-stat"><div className="lbl">채택 의향</div><div className="val">{scoreLabel(p.adoption)}</div></div>
         <div className="pd-stat"><div className="lbl">가격 부담</div><div className={"val " + priceCls}>{p.price}</div></div>
       </div>
 
@@ -353,7 +359,7 @@ function PersonaChat({ persona, onPersonaChat = null }) {
           <PersonaPortrait id={persona.id} size={40} />
           <div>
             <div className="chat-name">{persona.name}님과 대화</div>
-            <div className="chat-sub">{window.UpkinseyUI.personaBio(persona)}</div>
+            <div className="chat-sub">{personaBio(persona)}</div>
           </div>
         </div>
       </div>
@@ -385,11 +391,12 @@ function PersonaChat({ persona, onPersonaChat = null }) {
 
       <div className="chat-input-row">
         <textarea className="chat-input"
+                  aria-label={`${persona.name}님에게 후속 질문`}
                   placeholder="이 분께 직접 물어보세요. 예: 이 가격이면 왜 망설이세요?"
                   value={input}
                   rows={2}
                   onChange={e => setInput(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
+                  onKeyDown={e => { if (shouldSubmitChatOnEnter(e)) { e.preventDefault(); send(); } }} />
         <button className="send-btn" onClick={send}>
           물어보기
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" style={{ marginLeft: 6, verticalAlign: -2 }}>
@@ -434,7 +441,8 @@ function PersonasScreen({ mode, setMode, goNext, goBack, personas: livePersonas 
             { id: "constellation", label: "별자리" },
             { id: "cards", label: "카드" }
           ].map(m => (
-            <button key={m.id}
+            <button key={m.id} type="button"
+                    aria-pressed={viewMode === m.id}
                     className={"seg" + (viewMode === m.id ? " active" : "")}
                     onClick={() => setMode(m.id)}>
               {m.label}
@@ -472,4 +480,5 @@ function PersonasScreen({ mode, setMode, goNext, goBack, personas: livePersonas 
   );
 }
 
-window.PersonasScreen = PersonasScreen;
+
+export { PersonasScreen };

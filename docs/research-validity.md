@@ -56,11 +56,31 @@ rating. This is a proposed evaluation approach, not an implemented benchmark.
 
 ## Reproducibility and changes
 
-When comparing runs, keep a record of the brief, persona source/revision, panel,
-sampling seed, model, model settings, prompt/code version and failures. Some of
-these are not yet captured automatically; record missing provenance separately
-when needed. A fixed sampling seed preserves a sampling choice, not a guarantee
-of identical upstream model responses.
+New saved runs include schema version 1 and provenance: application version,
+actual model identifier when available, requested seed and separately observed
+panel sampling seeds (unknown if metadata is missing), source/selected counts,
+selected-panel and prompt hashes, known dataset sources/revisions, start time and
+duration. Missing identifiers or revisions remain unknown rather than inferred.
+Older runs may not contain this metadata.
+
+New persona samples have a versioned SHA-256 manifest, and cache reuse checks
+exact row counts and matching sampling metadata. `UPKINSEY_PERSONA_REVISION`
+(or the sampling CLI’s `--revision`) passes a requested commit/ref to the dataset
+loader and records it. A branch name remains a requested reference, not a
+resolved immutable commit. Prefer a verified commit when tracing a study;
+a checksum verifies local artifact integrity, not data representativeness.
+
+When comparing runs, also retain the original permitted brief/panel or sampling
+manifest, model/provider settings, code commit and failures. Hashes identify a
+change but cannot reconstruct the original input; source revision capture is
+still incomplete when the supplied persona records omit it. A fixed sampling
+seed preserves a sampling choice, not a guarantee of identical upstream model
+responses. Logical request counts are not provider-retry counts or billing totals.
+
+The local SQLite graph projects relationships and per-run evidence from saved
+JSON. Graph observation counts are not unique human respondents or independent
+empirical evidence. Graph retrieval is not used to ground model prompts. See
+[graph storage and interpretation](knowledge-graph.md).
 
 Separate example/replay data from newly generated results. Illustrative avatars
 and constellation positions are visual aids, not demographic evidence or a

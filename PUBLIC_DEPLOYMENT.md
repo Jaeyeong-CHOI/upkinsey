@@ -1,6 +1,6 @@
 # Public Deployment Guide
 
-Upkinsey serves the static prototype and API from the same Python process. This is an early-stage, single-operator application, not a multi-tenant service. Never put `UPSTAGE_API_KEY` in browser code; keep it as a server-side environment variable only.
+Upkinsey serves the production-built frontend and API from the same Python process. This is an early-stage, single-operator application, not a multi-tenant service. Never put `UPSTAGE_API_KEY` in browser code; keep it as a server-side environment variable only.
 
 ## Production safety defaults
 
@@ -60,6 +60,31 @@ UPSTAGE_DOCUMENT_PARSE_FILE_FIELD=document
 UPSTAGE_DOCUMENT_PARSE_TIMEOUT=120
 ```
 
+## Build and run from a checkout
+
+Node.js 22+ is needed only to build browser assets. Python 3.10+ runs the server.
+
+```bash
+npm ci
+npm run build
+python3 -m pip install -e '.[persona]'
+upkinsey --host 127.0.0.1 --port 5173
+```
+
+`python3 -m upstage_api_sim` and the legacy `python3 scripts/run_upkinsey_server.py`
+launcher call the same server. The Python wheel includes the API/CLI but does not
+include frontend assets. Supply the directory produced by `npm run build` with
+`--static-dir /path/to/frontend-dist` (or `UPKINSEY_STATIC_DIR`).
+Use `--data-dir /path/to/persistent-data` (or `UPKINSEY_DATA_DIR`) to select storage.
+Command-line options take precedence over environment variables. The server refuses
+to start if either built HTML entry point is missing. Run builds before switching
+traffic; do not serve `prototype/` directly.
+
+Browser React/JS/CSS are bundled locally with a lockfile; runtime CDN scripts,
+Babel transforms, and third-party font downloads are no longer needed. HTML
+revalidates, fingerprinted assets are immutable, and the server sends a same-origin
+script policy. The model API and an uncached dataset still require network access.
+
 ## Render deployment
 
 1. Push this branch to GitHub.
@@ -75,7 +100,8 @@ UPSTAGE_DOCUMENT_PARSE_TIMEOUT=120
 
 ## Railway/Fly.io/other Docker platforms
 
-Build and run the Dockerfile, passing the required and recommended environment variables above.
+The multi-stage Dockerfile uses Node 22 only during build and Python 3.11 for runtime.
+The runtime runs as UID/GID 10001, not root. Build and run it, passing the required and recommended environment variables above.
 
 ```bash
 docker build -t upkinsey .
@@ -84,6 +110,7 @@ docker run --rm -p 5173:5173 \
   -e UPKINSEY_REQUIRE_BASIC_AUTH=1 \
   -e UPKINSEY_BASIC_AUTH_USER="$UPKINSEY_BASIC_AUTH_USER" \
   -e UPKINSEY_BASIC_AUTH_PASSWORD="$UPKINSEY_BASIC_AUTH_PASSWORD" \
+  --mount source=upkinsey-data,target=/app/data \
   upkinsey
 ```
 
@@ -100,9 +127,29 @@ By default, saved runs and persona cache are local files under:
 ```text
 data/simulation_runs/
 data/personas/
+data/graph/upkinsey.sqlite3
+data/.trash/
 ```
 
 On Render/Railway-style ephemeral filesystems, these files can disappear on restart/redeploy. For durable production use, attach a persistent disk, mount `data/`, or replace the local JSON run store with an external database/object store.
+The image uses `/app/data`; source checkouts default to `<repository>/data`.
+Existing bind mounts must be writable by UID/GID 10001. Before upgrading from an
+older root-running image, back up the volume and arrange directory ownership for
+the service user; do not make the data directory world-writable. A fresh named
+volume inherits the image directory's ownership.
+
+JSON runs are canonical. SQLite is an automatically maintained, best-effort graph
+projection: graph failures do not invalidate a saved research run. Its summary is
+behind the same authentication as saved runs, not included in public health.
+Graph records have separate retention from JSON-run deletion; see the
+[graph and backfill guide](docs/knowledge-graph.md) before deleting or rebuilding.
+
+Set `UPKINSEY_PERSONA_REVISION` to an available dataset commit SHA for a fixed source
+revision. This is forwarded to the dataset loader and recorded, not independently
+resolved or certified. Unpinned panels honestly report the revision as unknown.
+Caches are checked for row count, sampling metadata, and (where present) content
+hash. Invalid files are quarantined under the cache's `.trash/`, never substituted
+with example personas. A fixed seed does not make live LLM outputs deterministic.
 
 ## Destructive API policy
 
@@ -143,8 +190,7 @@ saved research data while testing an upgrade.
 
 The default CI uses fixtures only. Passing it does not certify live Upstage API
 compatibility, Nemotron download access, or predictive validity of synthetic
-results. The frontend currently relies on version-pinned CDN scripts and fonts;
-it is not a fully offline web bundle.
+results. The frontend build can be served without CDN access; live research still requires provider/dataset access.
 
 All paid routes (simulation, persona chat, analyst interviews, and PDF parsing)
 share `UPKINSEY_MAX_ACTIVE_JOBS`. This bounds active operations, not dollars or
@@ -152,3 +198,10 @@ model tokens. Each operation can make several provider calls and retries; config
 provider-side spend limits separately. Synchronous slots are released on failure.
 Browser cross-origin mutations are rejected, including multipart PDF submissions;
 ordinary CLI requests without an Origin header remain supported.
+
+
+Updating GitHub alone does not update a local launch-agent/Cloudflare deployment.
+Confirm the deployment's actual checkout and launch command separately. Do not
+reset an existing checkout with uncommitted work or copy its `.env`/research data
+into a public branch. Switch only after a clean build, isolated no-key smoke,
+backup, and a recorded rollback target.

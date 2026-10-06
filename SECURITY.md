@@ -21,7 +21,7 @@ Upkinsey is an early-stage, self-hosted research prototype. Security fixes targe
 - Keep paid API routes behind authentication and HTTPS, using an appropriate reverse proxy or hosting platform. Leave destructive APIs disabled unless explicitly needed.
 - API keys belong only in server-side environment variables or secrets. `.env` and generated data must not be publicly served or committed.
 - Product briefs/persona context are sent to Upstage for inference; PDF extraction also sends the uploaded file to Upstage Document Parse. Local in-memory upload handling does not mean the document stays on the machine. Check provider policies before using sensitive information.
-- Runs and sampled personas are stored as local files; jobs and rate limits are process-local. Restrict filesystem access, plan backups/retention, and do not assume worker-to-worker coordination.
-- The browser prototype loads third-party scripts/fonts; default self-hosting is not air-gapped. Follow the [deployment guide](PUBLIC_DEPLOYMENT.md) and keep dependencies under review.
+- Runs and sampled personas are stored as local files; the SQLite graph separately retains projected evidence, including after a run is deleted. Include it in retention/erasure and backup planning; see [graph storage](docs/knowledge-graph.md). Jobs and rate limits are process-local. Restrict filesystem access, plan backups/retention, and do not assume worker-to-worker coordination.
+- The browser serves bundled React and local CSS; runtime CDN scripts, Babel and external font requests are no longer required. Build dependencies still come from package registries, and live inference/PDF parsing still sends data to Upstage. Review the lockfile and dependency audits; serve only built assets, not source trees or data directories. Follow the [deployment guide](PUBLIC_DEPLOYMENT.md).
 
 See [the maintainer guide](docs/maintaining.md) for repository security settings and release checks.
