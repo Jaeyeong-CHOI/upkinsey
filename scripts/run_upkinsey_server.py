@@ -10,6 +10,7 @@ import argparse
 import base64
 import hmac
 import json
+import math
 import os
 import re
 from email.parser import BytesParser
@@ -55,8 +56,8 @@ RATE_LIMIT_LOCK = threading.Lock()
 
 MUTATING_API_PATHS = {"/api/simulate", "/api/simulate/start", "/api/persona-chat", "/api/analyst-question", "/api/document-brief"}
 REDACTION_PATTERNS = [
-    re.compile(r"Bearer\s+[A-Za-z0-9._~+\-/]+=*", re.I),
-    re.compile(r"(api[_-]?key|authorization|token|password)\s*[:=]\s*['\"]?[^\s'\",}]+", re.I),
+    re.compile(r"(?:Bearer|Basic)\s+[A-Za-z0-9._~+\-/]+=*", re.I),
+    re.compile(r"(api[_-]?key|authorization|token|password)['\"]?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,}]+)", re.I),
 ]
 
 
@@ -78,7 +79,7 @@ def _basic_auth_allowed(header: str | None) -> bool:
         return True
     if not _basic_auth_configured():
         return False
-    if not header or not header.startswith("Basic "):
+    if not header or header.partition(" ")[0].lower() != "basic":
         return False
     try:
         decoded = base64.b64decode(header.split(" ", 1)[1], validate=True).decode("utf-8")
@@ -87,7 +88,9 @@ def _basic_auth_allowed(header: str | None) -> bool:
         return False
     expected_user = os.environ.get("UPKINSEY_BASIC_AUTH_USER", "")
     expected_password = os.environ.get("UPKINSEY_BASIC_AUTH_PASSWORD", "")
-    return hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_password)
+    return hmac.compare_digest(username.encode("utf-8"), expected_user.encode("utf-8")) and hmac.compare_digest(
+        password.encode("utf-8"), expected_password.encode("utf-8")
+    )
 
 
 def _destructive_api_enabled() -> bool:
@@ -106,7 +109,7 @@ def _active_job_count() -> int:
 
 
 def _reserve_simulation_job(payload: dict) -> tuple[str | None, int]:
-    """Atomically reserve an in-memory job slot, or return the current limit."""
+    """Reserve a shared paid-operation slot (async jobs retain their snapshot)."""
 
     _cleanup_finished_jobs()
     limit = _max_active_jobs()
@@ -130,10 +133,8 @@ def _reserve_simulation_job(payload: dict) -> tuple[str | None, int]:
 
 
 def _client_id(handler: SimpleHTTPRequestHandler) -> str:
-    for header in ("CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP"):
-        value = handler.headers.get(header)
-        if value:
-            return value.split(",", 1)[0].strip()[:80]
+    # Forwarding headers are caller-controlled without an explicit trusted-proxy
+    # configuration. Behind a proxy this intentionally shares the peer's budget.
     host, *_ = getattr(handler, "client_address", ("unknown",))
     return str(host)[:80]
 
@@ -147,6 +148,8 @@ def _check_rate_limit(client_id: str, *, now: float | None = None) -> tuple[bool
     window_start = current - 60
     limit = _rate_limit_per_minute()
     with RATE_LIMIT_LOCK:
+        for stale_client in [key for key, hits in RATE_LIMIT_STATE.items() if not hits or hits[-1] < window_start]:
+            RATE_LIMIT_STATE.pop(stale_client, None)
         hits = [ts for ts in RATE_LIMIT_STATE.get(client_id, []) if ts >= window_start]
         if len(hits) >= limit:
             retry_after = max(1, int(round(60 - (current - hits[0])))) if hits else 60
@@ -159,6 +162,10 @@ def _check_rate_limit(client_id: str, *, now: float | None = None) -> tuple[bool
 
 def _safe_error_message(exc: Exception | str, *, limit: int = 240) -> str:
     text = str(exc)
+    for name in ("UPSTAGE_API_KEY", "UPKINSEY_BASIC_AUTH_PASSWORD"):
+        secret = os.environ.get(name)
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
     for pattern in REDACTION_PATTERNS:
         text = pattern.sub("[REDACTED]", text)
     return text[:limit]
@@ -167,7 +174,7 @@ def _safe_error_message(exc: Exception | str, *, limit: int = 240) -> str:
 def _bounded_int(value, *, default: int, min_value: int, max_value: int) -> int:
     try:
         parsed = int(round(float(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         parsed = default
     return max(min_value, min(max_value, parsed))
 
@@ -210,26 +217,54 @@ def _cleanup_finished_jobs(now: float | None = None) -> None:
             SIMULATION_JOBS.pop(job_id, None)
 
 
-def _read_json_body(handler: SimpleHTTPRequestHandler) -> dict:
-    """Read a bounded JSON object request body."""
+def _read_bounded_body(handler: SimpleHTTPRequestHandler, *, limit: int, too_large: str, empty: str) -> bytes:
+    """Reject ambiguous framing and read exactly one bounded request body."""
 
+    if handler.headers.get("Transfer-Encoding") is not None:
+        raise ValueError("unsupported_transfer_encoding")
+    if hasattr(handler.headers, "get_all") and len(handler.headers.get_all("Content-Length", [])) > 1:
+        raise ValueError("invalid_content_length")
     raw_length = handler.headers.get("Content-Length")
     if raw_length is None:
         raise ValueError("missing_content_length")
+    if not re.fullmatch(r"[0-9]+", raw_length):
+        raise ValueError("invalid_content_length")
     try:
         length = int(raw_length)
     except ValueError as exc:
         raise ValueError("invalid_content_length") from exc
     if length <= 0:
-        raise ValueError("empty_request_body")
-    if length > _max_body_bytes():
-        raise ValueError("request_body_too_large")
+        raise ValueError(empty)
+    if length > limit:
+        raise ValueError(too_large)
+    try:
+        raw = handler.rfile.read(length)
+    except TimeoutError as exc:
+        raise ValueError("request_body_timeout") from exc
+    if len(raw) != length:
+        raise ValueError("incomplete_request_body")
+    return raw
+
+
+def _read_json_body(handler: SimpleHTTPRequestHandler) -> dict:
+    """Read a bounded JSON object request body with finite JSON numbers."""
+
+    content_type = handler.headers.get("Content-Type")
+    if content_type and content_type.split(";", 1)[0].strip().lower() != "application/json":
+        raise ValueError("application_json_required")
+    raw = _read_bounded_body(handler, limit=_max_body_bytes(), too_large="request_body_too_large", empty="empty_request_body")
+
+    def finite_number(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("invalid_json_body")
+        return parsed
 
     try:
-        payload = json.loads(handler.rfile.read(length).decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"), parse_float=finite_number, parse_constant=finite_number)
     except UnicodeDecodeError as exc:
         raise ValueError("request_body_must_be_utf8") from exc
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise ValueError("invalid_json_body") from exc
     if not isinstance(payload, dict):
         raise ValueError("request_body_must_be_object")
@@ -249,21 +284,9 @@ def _read_uploaded_document(handler: SimpleHTTPRequestHandler) -> tuple[bytes, s
     """Read a bounded multipart PDF upload from `file` or `document`."""
 
     content_type = handler.headers.get("Content-Type", "")
-    if "multipart/form-data" not in content_type:
+    if content_type.split(";", 1)[0].strip().lower() != "multipart/form-data":
         raise ValueError("multipart_form_data_required")
-    raw_length = handler.headers.get("Content-Length")
-    if raw_length is None:
-        raise ValueError("missing_content_length")
-    try:
-        length = int(raw_length)
-    except ValueError as exc:
-        raise ValueError("invalid_content_length") from exc
-    if length <= 0:
-        raise ValueError("empty_document_upload")
-    if length > _max_document_bytes():
-        raise ValueError("document_too_large")
-
-    raw = handler.rfile.read(length)
+    raw = _read_bounded_body(handler, limit=_max_document_bytes(), too_large="document_too_large", empty="empty_document_upload")
     message = BytesParser(policy=email_policy).parsebytes(
         b"Content-Type: " + content_type.encode("utf-8") + b"\r\n\r\n" + raw
     )
@@ -419,15 +442,55 @@ def _run_simulation_job(job_id: str, payload: dict) -> None:
             job_id,
             status="error",
             stage="error",
-            message=str(exc)[:500],
+            message=_safe_error_message(exc),
             error="simulation_failed",
             percent=100,
         )
 
 
+def _validate_followup_payload(payload: dict, path: str) -> None:
+    """Validate nested containers before constructing prompts or using quota."""
+
+    object_fields = ("brief", "persona") if path == "/api/persona-chat" else ("brief",)
+    for field in object_fields:
+        if field in payload and payload[field] is not None and not isinstance(payload[field], dict):
+            raise ValueError(f"{field} must be an object")
+    list_field = "history" if path == "/api/persona-chat" else "persona_reactions"
+    items = payload.get(list_field)
+    if items is not None and (not isinstance(items, list) or any(not isinstance(item, dict) for item in items)):
+        raise ValueError(f"{list_field} must be a list of objects")
+
+
 class Handler(SimpleHTTPRequestHandler):
+    # Bound idle header/body reads; upstream calls retain their own API timeouts.
+    timeout = 30
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT / "prototype"), **kwargs)
+
+    def send_head(self):
+        """Keep static responses inside the public root, including index links."""
+
+        static_directory = Path(self.directory)
+        root = static_directory.resolve()
+        path = Path(self.translate_path(self.path))
+        candidates = [path]
+        try:
+            if path.is_dir():
+                candidates.extend(path / name for name in ("index.html", "index.htm"))
+            for candidate in candidates:
+                relative = candidate.resolve().relative_to(root)
+                lexical = candidate.relative_to(static_directory)
+                if any(part.startswith(".") for part in (*relative.parts, *lexical.parts)):
+                    raise ValueError("private_path")
+        except (ValueError, OSError, RuntimeError):
+            self.send_error(404, "File not found")
+            return None
+        return super().send_head()
+
+    def list_directory(self, path):
+        self.send_error(404, "File not found")
+        return None
 
     def _require_auth(self) -> bool:
         if _basic_auth_allowed(self.headers.get("Authorization")):
@@ -443,7 +506,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
         return False
 
     def _send_json(self, status: int, payload: dict):
@@ -453,7 +517,30 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _require_same_origin(self) -> bool:
+        """Reject browser cross-site mutations, including multipart PDF posts.
+
+        CLI/API clients without Origin remain supported. Reverse proxies must
+        preserve the public Host header; untrusted forwarding headers are ignored.
+        """
+
+        origin = self.headers.get("Origin")
+        cross_site = self.headers.get("Sec-Fetch-Site", "").lower() == "cross-site"
+        if origin:
+            try:
+                parsed = urlparse(origin)
+                cross_site = cross_site or parsed.scheme not in {"http", "https"} or (
+                    parsed.netloc.lower() != self.headers.get("Host", "").lower()
+                )
+            except ValueError:
+                cross_site = True
+        if cross_site:
+            self._send_json(403, {"error": "cross_origin_request_denied"})
+            return False
+        return True
 
     def _check_mutating_api_budget(self) -> bool:
         ok, retry_after = _check_rate_limit(_client_id(self))
@@ -469,6 +556,10 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
         return False
+
+    def do_HEAD(self):
+        # Use the same auth and API routing as GET, without response bodies.
+        self.do_GET()
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -515,10 +606,15 @@ class Handler(SimpleHTTPRequestHandler):
             except ValueError:
                 self._send_json(400, {"error": "invalid_version_id"})
             return
-        super().do_GET()
+        if self.command == "HEAD":
+            super().do_HEAD()
+        else:
+            super().do_GET()
 
     def do_DELETE(self):
         if not self._require_auth():
+            return
+        if not self._require_same_origin():
             return
         if not _destructive_api_enabled():
             self._send_json(403, {"error": "destructive_api_disabled"})
@@ -541,40 +637,54 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         if not self._require_auth():
             return
+        if not self._require_same_origin():
+            return
         parsed = urlparse(self.path)
         if parsed.path not in {"/api/simulate", "/api/simulate/start", "/api/persona-chat", "/api/analyst-question", "/api/document-brief"}:
             self._send_json(404, {"error": "not_found"})
             return
         if parsed.path in MUTATING_API_PATHS and not self._check_mutating_api_budget():
             return
+        synchronous_job_id = None
         try:
             if parsed.path == "/api/document-brief":
                 file_bytes, filename, content_type = _read_uploaded_document(self)
-                result = parse_document_to_brief(file_bytes, filename=filename, content_type=content_type)
-                self._send_json(200, result)
-                return
-            payload = _read_json_body(self)
-            if parsed.path == "/api/simulate/start":
-                job_id, max_active_jobs = _reserve_simulation_job(payload)
-                if not job_id:
-                    self._send_json(429, {"error": "too_many_active_jobs", "max_active_jobs": max_active_jobs})
-                    return
-                threading.Thread(target=_run_simulation_job, args=(job_id, payload), daemon=True).start()
-                result = _job_snapshot(job_id)
-            elif parsed.path == "/api/simulate":
-                max_workers = _bounded_int(
-                    payload.get("max_parallel_requests") or os.environ.get("UPKINSEY_MAX_PARALLEL_REQUESTS", "2"),
-                    default=2,
-                    min_value=1,
-                    max_value=8,
-                )
-                personas = load_or_sample_personas(payload)
-                result = simulate_market_research(payload, personas=personas, max_workers=max_workers)
-                saved = save_simulation_run(RUN_STORE, payload, result)
-                result = dict(result)
-                result["version"] = saved["summary"]
+                payload = {}
             else:
-                if parsed.path == "/api/persona-chat":
+                payload = _read_json_body(self)
+                if parsed.path in {"/api/persona-chat", "/api/analyst-question"}:
+                    _validate_followup_payload(payload, parsed.path)
+
+            # Every paid route shares the same process-wide concurrency budget.
+            job_id, max_active_jobs = _reserve_simulation_job(payload)
+            if not job_id:
+                self._send_json(429, {"error": "too_many_active_jobs", "max_active_jobs": max_active_jobs})
+                return
+            if parsed.path == "/api/simulate/start":
+                try:
+                    threading.Thread(target=_run_simulation_job, args=(job_id, payload), daemon=True).start()
+                except Exception:
+                    with SIMULATION_JOBS_LOCK:
+                        SIMULATION_JOBS.pop(job_id, None)
+                    raise
+                result = _job_snapshot(job_id)
+            else:
+                synchronous_job_id = job_id
+                if parsed.path == "/api/document-brief":
+                    result = parse_document_to_brief(file_bytes, filename=filename, content_type=content_type)
+                elif parsed.path == "/api/simulate":
+                    max_workers = _bounded_int(
+                        payload.get("max_parallel_requests") or os.environ.get("UPKINSEY_MAX_PARALLEL_REQUESTS", "2"),
+                        default=2,
+                        min_value=1,
+                        max_value=8,
+                    )
+                    personas = load_or_sample_personas(payload)
+                    result = simulate_market_research(payload, personas=personas, max_workers=max_workers)
+                    saved = save_simulation_run(RUN_STORE, payload, result)
+                    result = dict(result)
+                    result["version"] = saved["summary"]
+                elif parsed.path == "/api/persona-chat":
                     result = chat_with_persona(
                         payload.get("brief") or {},
                         payload.get("persona") or {},
@@ -591,7 +701,7 @@ class Handler(SimpleHTTPRequestHandler):
                         max_rounds=_bounded_int(payload.get("max_rounds"), default=5, min_value=1, max_value=5),
                     )
         except ValueError as exc:
-            self._send_json(400, {"error": str(exc)})
+            self._send_json(400, {"error": _safe_error_message(exc)})
             return
         except RuntimeError as exc:
             self._send_json(502, {"error": "upstream_or_runtime_failure", "message": _safe_error_message(exc)})
@@ -600,6 +710,10 @@ class Handler(SimpleHTTPRequestHandler):
             # Never expose secrets; only return sanitized error text.
             self._send_json(500, {"error": "simulation_failed", "message": _safe_error_message(exc)})
             return
+        finally:
+            if synchronous_job_id:
+                with SIMULATION_JOBS_LOCK:
+                    SIMULATION_JOBS.pop(synchronous_job_id, None)
         self._send_json(200, result)
 
 

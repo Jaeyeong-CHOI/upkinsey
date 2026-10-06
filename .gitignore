@@ -3,7 +3,7 @@
 !.env.example
 __pycache__/
 *.pyc
-.venv/
+.venv*/
 node_modules/
 *.egg-info/
 runs/
@@ -12,3 +12,6 @@ data/personas/*.manifest.json
 data/simulation_runs/*.json
 .trash/
 .DS_Store
+build/
+dist/
+.pytest_cache/

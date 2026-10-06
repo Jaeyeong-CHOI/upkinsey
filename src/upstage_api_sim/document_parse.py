@@ -96,15 +96,15 @@ def call_document_parse_api(file_bytes: bytes, *, filename: str = "document.pdf"
                 except json.JSONDecodeError:
                     return {"text": text, "raw_text_response": True}
         except urllib.error.HTTPError as exc:
-            detail = _redact(exc.read().decode("utf-8", errors="replace")[:1200], config.api_key)
+            detail = _redact(exc.read().decode("utf-8", errors="replace"), config.api_key)[:1200]
             last_error = RuntimeError(f"Upstage Document Parse API error {exc.code}: {detail}")
             if exc.code not in RETRYABLE_STATUS_CODES or attempt == attempts - 1:
-                raise last_error from exc
+                raise last_error from None
             client_guard._sleep_before_retry(attempt, _retry_after_from_headers(exc.headers))
         except (urllib.error.URLError, TimeoutError) as exc:
-            last_error = RuntimeError(f"Upstage Document Parse transport error: {exc}")
+            last_error = RuntimeError(f"Upstage Document Parse transport error: {_redact(str(exc), config.api_key)}")
             if attempt == attempts - 1:
-                raise last_error from exc
+                raise last_error from None
             client_guard._sleep_before_retry(attempt, None)
 
     raise RuntimeError(f"Upstage Document Parse failed: {last_error}")
@@ -209,7 +209,7 @@ def normalize_extracted_brief(data: dict[str, Any]) -> dict[str, Any]:
     try:
         raw_confidence = float(data.get("confidence") or 0)
         confidence = int(round(raw_confidence * 100 if 0 < raw_confidence <= 1 else raw_confidence))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         confidence = 0
     if confidence <= 0:
         filled = sum(bool(value) for value in [product_name, description, target, alternatives, hypothesis])

@@ -143,7 +143,7 @@ function Constellation({ personas, selectedId, onSelect }) {
       <div className="constellation-grid"></div>
 
       <div className="const-meta">
-        가까이 있을수록 의견이 비슷해요 · 크기는 채택 의향
+        위치는 화면 배치용 · 크기는 합성 채택 의향 점수
       </div>
 
       <svg>
@@ -181,7 +181,7 @@ function Constellation({ personas, selectedId, onSelect }) {
             </div>
             <div className="node-label">
               <div className="node-name">{p.name}</div>
-              <div className="node-meta">{p.age}세 · 채택 {p.adoption}%</div>
+              <div className="node-meta">{p.age == null ? "나이 미제공" : `${p.age}세`} · 채택 {window.UpkinseyUI.scoreLabel(p.adoption)}</div>
             </div>
           </div>
         );
@@ -210,7 +210,7 @@ function PersonaCards({ personas, selectedId, onSelect }) {
               <PersonaPortrait id={p.id} size={44} />
               <div>
                 <div className="pcard-name">{p.name}</div>
-                <div className="pcard-bio">{p.age}세 · {p.region} · {p.role}</div>
+                <div className="pcard-bio">{window.UpkinseyUI.personaBio(p)}</div>
               </div>
             </div>
           </div>
@@ -220,7 +220,7 @@ function PersonaCards({ personas, selectedId, onSelect }) {
             <div className="pcard-meter-bar">
               <div className="pcard-meter-bar-fill" style={{ width: p.adoption + "%" }}></div>
             </div>
-            <span className="pcard-meter-val">{p.adoption}%</span>
+            <span className="pcard-meter-val">{window.UpkinseyUI.scoreLabel(p.adoption)}</span>
           </div>
         </div>
       ))}
@@ -241,7 +241,7 @@ function PersonaDetail({ persona }) {
         <PersonaPortrait id={p.id} size={64} />
         <div>
           <div className="pd-name">{p.name}</div>
-          <div className="pd-bio">{p.age}세 · {p.region} · {p.role}</div>
+          <div className="pd-bio">{window.UpkinseyUI.personaBio(p)}</div>
         </div>
       </div>
 
@@ -250,9 +250,9 @@ function PersonaDetail({ persona }) {
       </div>
 
       <div className="pd-stats">
-        <div className="pd-stat"><div className="lbl">제품 이해도</div><div className="val">{p.understanding}%</div></div>
-        <div className="pd-stat"><div className="lbl">문제 적합도</div><div className="val">{p.need}%</div></div>
-        <div className="pd-stat"><div className="lbl">채택 의향</div><div className="val">{p.adoption}%</div></div>
+        <div className="pd-stat"><div className="lbl">제품 이해도</div><div className="val">{window.UpkinseyUI.scoreLabel(p.understanding)}</div></div>
+        <div className="pd-stat"><div className="lbl">문제 적합도</div><div className="val">{window.UpkinseyUI.scoreLabel(p.need)}</div></div>
+        <div className="pd-stat"><div className="lbl">채택 의향</div><div className="val">{window.UpkinseyUI.scoreLabel(p.adoption)}</div></div>
         <div className="pd-stat"><div className="lbl">가격 부담</div><div className={"val " + priceCls}>{p.price}</div></div>
       </div>
 
@@ -300,7 +300,7 @@ function PersonaChat({ persona, onPersonaChat = null }) {
     setStream([]);
     setInput("");
     setThinking(false);
-    const script = onPersonaChat ? [persona.core].filter(Boolean) : (RESONANCE_DATA.chatScript[persona.id] || [persona.core]);
+    const script = [persona.core].filter(Boolean);
     const out = [];
     let i = 0;
     let timer;
@@ -329,8 +329,10 @@ function PersonaChat({ persona, onPersonaChat = null }) {
     setInput("");
     setThinking(true);
     try {
-      const reply = onPersonaChat ? await onPersonaChat(persona, q, nextStream.map(m => ({ role: m.role === 'bot' ? 'persona' : 'user', content: m.text }))) : customReply(persona, q);
-      setStream(s => [...s, { role: "bot", text: reply || customReply(persona, q) }]);
+      if (!onPersonaChat) throw new Error("후속 질문 API가 연결되지 않았어요.");
+      const reply = await onPersonaChat(persona, q, stream.map(m => ({ role: m.role === 'bot' ? 'persona' : 'user', content: m.text })));
+      if (typeof reply !== "string" || !reply.trim()) throw new Error("빈 응답을 받았어요. 다시 시도해주세요.");
+      setStream(s => [...s, { role: "bot", text: reply }]);
     } catch (err) {
       setStream(s => [...s, { role: "bot", text: `API 요청이 실패했습니다: ${err.message || err}` }]);
     } finally {
@@ -351,7 +353,7 @@ function PersonaChat({ persona, onPersonaChat = null }) {
           <PersonaPortrait id={persona.id} size={40} />
           <div>
             <div className="chat-name">{persona.name}님과 대화</div>
-            <div className="chat-sub">{persona.age}세 · {persona.region} · {persona.role}</div>
+            <div className="chat-sub">{window.UpkinseyUI.personaBio(persona)}</div>
           </div>
         </div>
       </div>
@@ -399,34 +401,10 @@ function PersonaChat({ persona, onPersonaChat = null }) {
   );
 }
 
-function customReply(p, q) {
-  const name = p.name;
-  if (/가격|39|290|월|구독|돈|비싸/.test(q)) {
-    if (p.stance === "neg") return `${name}: 솔직히 가격 자체보다, ‘월 39,000원이 어디에 쓰이는지'가 안 보여요. 한 달에 어떤 가치가 새로 들어오는지 명세화돼야 결제 버튼이 눌릴 것 같습니다.`;
-    if (p.stance === "pos") return `${name}: 가격은 합리적이라고 봐요. 다만 본체 290,000원을 먼저 결제하는 건 부담이고, 월 39,000원이면 1년에 47만원이라 결국 큰돈입니다. 6개월 묶음이 있으면 좋겠어요.`;
-    return `${name}: 가격이 비싸진 않은데, 안 쓰면 그대로 손해라는 느낌이 있어요. 안전장치가 있으면 결제하기 쉬울 것 같아요.`;
-  }
-  if (/가족|자녀|부모|어머/.test(q)) {
-    return `${name}: 결제는 자녀가, 사용은 부모가. 이 구조가 명확히 보이면 훨씬 사기 쉽습니다. 부모님이 음성으로 "고마워"라고 했을 때 자녀 폰에 메시지가 가는 식이면 매월 결제할 이유가 생겨요.`;
-  }
-  if (/안전|개인정보|데이터|발열/.test(q)) {
-    return `${name}: 어르신이 매일 만지는 물건이에요. 외장재 발열, 모서리 안전, 그리고 음성 데이터가 어디에 저장되는지. 이 세 가지는 소개에 한 줄로라도 있어야 합니다.`;
-  }
-  if (/추천|친구/.test(q)) {
-    if (p.stance === "pos") return `${name}: 사양 정보만 확실하면 주변에 한 명 정도는 추천할 수 있을 것 같아요.`;
-    if (p.stance === "neg") return `${name}: 지금 상태로는 추천 못 해요. 제가 안 살 거니까요.`;
-    return `${name}: 일단 제가 좀 더 써본 다음에 생각해볼게요.`;
-  }
-  if (/사용|어떻게|쓸|켜/.test(q)) {
-    return `${name}: 솔직히 ‘강아지처럼 반응한다'가 머릿속에 안 그려져요. 영상 한 편이면 바로 이해될 텐데, 글로만 들으면 추상적이에요.`;
-  }
-  return `${name}: 좋은 질문이에요. 솔직히 지금 정보만으로는 답하기 어렵고, 실제 시연 영상 30초만 보여주시면 의견이 달라질 수 있을 것 같아요.`;
-}
-
 /* ====== Screen wrapper ====== */
 
 function PersonasScreen({ mode, setMode, goNext, goBack, personas: livePersonas = null, onPersonaChat = null }) {
-  const personas = (livePersonas && livePersonas.length) ? livePersonas : RESONANCE_DATA.personas;
+  const personas = Array.isArray(livePersonas) ? livePersonas : [];
   const [selectedId, setSelectedId] = useStateP(personas[0]?.id || "p4");
   const viewMode = mode === "cards" ? "cards" : "constellation";
 
@@ -435,20 +413,21 @@ function PersonasScreen({ mode, setMode, goNext, goBack, personas: livePersonas 
   }, [personas.length]);
 
   const selected = personas.find(p => p.id === selectedId) || personas[0];
+  if (!selected) return <div className="page"><h1 className="page-title">표시할 합성 응답이 없어요</h1><p className="page-sub">이번 실행에는 응답자가 없습니다. 예시 응답으로 대체하지 않습니다.</p><button className="btn" onClick={goBack}>결과 화면으로</button></div>;
 
   return (
     <div className="page" data-screen-label="04 Personas">
       <div className="page-head">
         <div className="page-eyebrow">4단계 · 응답자 한 명씩 들여다보기</div>
         <h1 className="page-title">응답자가<br /><em>당신의 제품 앞에 앉아있습니다</em></h1>
-        <p className="page-sub">한 명을 클릭하면 그 사람의 점수, 핵심 반응, 그리고 직접 대화까지 할 수 있어요. 앞 단계의 평균값이 여기서 개별 목소리로 분해됩니다.</p>
+        <p className="page-sub">합성 응답자를 클릭하면 모델이 생성한 점수와 반응을 확인하고 후속 질문을 할 수 있어요. 초상화는 인물 특성을 반영하지 않는 장식입니다. 앞 단계의 평균값이 여기서 개별 목소리로 분해됩니다.</p>
       </div>
 
       <div className="persona-controls">
         <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
           <span className="card-tag">4단계</span>
           <span style={{ fontSize: 14, fontWeight: 500 }}>한 명씩 들여다보기</span>
-          <span className="dim" style={{ fontSize: 12 }}>오늘 12:50 결과 · {personas.length}명</span>
+          <span className="dim" style={{ fontSize: 12 }}>현재 실행 · 합성 응답 {personas.length}개</span>
         </div>
         <div className="const-overlay-controls">
           {[
@@ -476,7 +455,7 @@ function PersonasScreen({ mode, setMode, goNext, goBack, personas: livePersonas 
 
       <div className="workspace">
         <PersonaDetail persona={selected} />
-        <PersonaChat persona={selected} onPersonaChat={onPersonaChat} />
+        <PersonaChat key={selected.id} persona={selected} onPersonaChat={onPersonaChat} />
       </div>
 
       <div className="row between" style={{ marginTop: 36 }}>

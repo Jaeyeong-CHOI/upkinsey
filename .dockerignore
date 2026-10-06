@@ -4,10 +4,13 @@
 !.env.example
 __pycache__/
 *.pyc
-.venv/
+.venv*/
 node_modules/
 *.egg-info/
 runs/
 data/
 .trash/
 .DS_Store
+build/
+dist/
+.pytest_cache/

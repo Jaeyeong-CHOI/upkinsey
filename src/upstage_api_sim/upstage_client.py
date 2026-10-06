@@ -135,16 +135,16 @@ class UpstageClient:
                 with urllib.request.urlopen(request, timeout=timeout) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
-                detail = _redact(exc.read().decode("utf-8", errors="replace")[:1200], self.config.api_key)
+                detail = _redact(exc.read().decode("utf-8", errors="replace"), self.config.api_key)[:1200]
                 retry_after = _retry_after_from_headers(exc.headers)
                 last_error = RuntimeError(f"Upstage API error {exc.code}: {detail}")
                 if exc.code not in RETRYABLE_STATUS_CODES or attempt == attempts - 1:
-                    raise last_error from exc
+                    raise last_error from None
                 self._sleep_before_retry(attempt, retry_after)
             except (urllib.error.URLError, TimeoutError) as exc:
-                last_error = RuntimeError(f"Upstage API transport error: {exc}")
+                last_error = RuntimeError(f"Upstage API transport error: {_redact(str(exc), self.config.api_key)}")
                 if attempt == attempts - 1:
-                    raise last_error from exc
+                    raise last_error from None
                 self._sleep_before_retry(attempt, None)
 
         raise RuntimeError(f"Upstage API failed: {last_error}")
@@ -178,6 +178,7 @@ class UpstageClient:
         delay = min(max(0.0, delay), max(1.0, float(self.config.max_retry_delay_seconds or 60.0)))
         if retry_after is None and delay > 0:
             delay += random.uniform(0, min(0.35, delay * 0.1))
+        delay = min(delay, max(1.0, float(self.config.max_retry_delay_seconds or 60.0)))
         time.sleep(delay)
 
     def complete_text(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
@@ -188,7 +189,13 @@ class UpstageClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         data = self.chat_completion(messages, **kwargs)
-        return data["choices"][0]["message"]["content"]
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise RuntimeError("Upstage API returned no text completion") from None
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("Upstage API returned no text completion")
+        return content
 
 
 def _retry_after_from_headers(headers: Any) -> float | None:

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ def _default_trash_dir(store_dir: str | Path) -> Path:
 
 def _trash_path(path: Path, trash_dir: str | Path | None) -> Path:
     trash_root = Path(trash_dir) if trash_dir is not None else _default_trash_dir(path.parent)
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     dest_dir = trash_root / stamp
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / path.name
@@ -57,8 +58,9 @@ def _result_section(result: dict[str, Any], key: str) -> dict[str, Any]:
 
 def _as_number(value: Any) -> float | None:
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -71,9 +73,13 @@ def _delta_direction(delta: float | None) -> str:
 def _load_run_file(path: Path) -> dict[str, Any] | None:
     try:
         run = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return run if isinstance(run, dict) else None
+
+
+def _list_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
 
 
 def summarize_run(run: dict[str, Any]) -> dict[str, Any]:
@@ -91,7 +97,7 @@ def summarize_run(run: dict[str, Any]) -> dict[str, Any]:
         "product_name": _safe_text(brief.get("product_name"), limit=80) or "제품",
         "research_type": _safe_text(brief.get("research_type"), limit=80) or "Concept test",
         "sample_size": request_budget.get("requested_sample_size") or brief.get("sample_size"),
-        "persona_count": len(result.get("persona_reactions") or result.get("personas") or []),
+        "persona_count": _list_count(result.get("persona_reactions") or result.get("personas") or []),
         "adoption_score": result.get("adoption_score"),
         "need_fit_score": result.get("need_fit_score"),
         "price_risk": result.get("price_risk"),
@@ -99,18 +105,18 @@ def summarize_run(run: dict[str, Any]) -> dict[str, Any]:
         "evidence_quality_score": evidence_quality.get("score"),
         "evidence_quality_level": _safe_text(evidence_quality.get("level"), limit=40),
         "evidence_confidence": _safe_text(evidence_quality.get("confidence"), limit=40),
-        "evidence_warning_count": len(evidence_quality.get("warnings") or []),
+        "evidence_warning_count": _list_count(evidence_quality.get("warnings") or []),
         "actual_persona_calls": request_budget.get("solar_persona_calls") or request_budget.get("actual_persona_count"),
         "estimated_model_calls": request_budget.get("estimated_total_model_calls"),
         "planned_batches": request_budget.get("planned_batches"),
         "max_parallel_requests": request_budget.get("max_parallel_requests"),
-        "request_budget_warning_count": len(request_budget.get("warnings") or []),
+        "request_budget_warning_count": _list_count(request_budget.get("warnings") or []),
         "panel_selection_mode": _safe_text(panel_profile.get("selection_mode"), limit=60),
         "panel_filter_source": _safe_text(panel_profile.get("persona_filter_source"), limit=60),
         "source_persona_count": panel_profile.get("source_persona_count"),
         "selected_persona_count": panel_profile.get("selected_persona_count"),
         "target_filter_match_count": panel_profile.get("target_filter_match_count"),
-        "panel_warning_count": len(panel_profile.get("warnings") or []),
+        "panel_warning_count": _list_count(panel_profile.get("warnings") or []),
     }
 
 
@@ -167,8 +173,8 @@ def save_simulation_run(store_dir: str | Path, brief: dict[str, Any], result: di
 
     root = Path(store_dir)
     root.mkdir(parents=True, exist_ok=True)
-    created_at = datetime.now(UTC).replace(microsecond=0).isoformat()
-    version_id = f"{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
+    created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    version_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
     run = {
         "version_id": version_id,
         "created_at": created_at,
@@ -186,13 +192,12 @@ def list_simulation_runs(store_dir: str | Path, *, limit: int = 50) -> list[dict
     """List recent saved simulation versions, newest first."""
 
     root = Path(store_dir)
-    if not root.exists():
+    if not root.exists() or limit <= 0:
         return []
     summaries: list[dict[str, Any]] = []
     for path in sorted(root.glob("*.json"), reverse=True):
-        try:
-            run = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        run = _load_run_file(path)
+        if run is None:
             continue
         summaries.append(summarize_run(run))
         if len(summaries) >= limit:
@@ -208,11 +213,14 @@ def load_simulation_run(store_dir: str | Path, version_id: str) -> dict[str, Any
     path = Path(store_dir) / f"{version_id}.json"
     if not path.exists():
         raise FileNotFoundError(version_id)
-    run = json.loads(path.read_text(encoding="utf-8"))
+    run = _load_run_file(path)
+    if run is None:
+        raise ValueError("invalid_version_file")
     result = run.get("result") if isinstance(run.get("result"), dict) else {}
     result = dict(result)
     result["version"] = summarize_run(run)
-    return {"version": summarize_run(run), "brief": run.get("brief") or {}, "result": result}
+    brief = run.get("brief") if isinstance(run.get("brief"), dict) else {}
+    return {"version": summarize_run(run), "brief": brief, "result": result}
 
 
 def compare_simulation_run(store_dir: str | Path, version_id: str, *, baseline_version_id: str | None = None) -> dict[str, Any]:
@@ -291,11 +299,8 @@ def delete_simulation_run(store_dir: str | Path, version_id: str, *, trash_dir: 
     path = Path(store_dir) / f"{version_id}.json"
     if not path.exists():
         raise FileNotFoundError(version_id)
-    try:
-        run = json.loads(path.read_text(encoding="utf-8"))
-        summary = summarize_run(run)
-    except (OSError, json.JSONDecodeError):
-        summary = {"version_id": version_id}
+    run = _load_run_file(path)
+    summary = summarize_run(run) if run is not None else {"version_id": version_id}
     dest = _trash_path(path, trash_dir)
     path.replace(dest)
     return {"deleted": 1, "version": summary, "trash_path": str(dest)}
@@ -310,11 +315,8 @@ def clear_simulation_runs(store_dir: str | Path, *, trash_dir: str | Path | None
     versions: list[dict[str, Any]] = []
     deleted = 0
     for path in sorted(root.glob("*.json")):
-        try:
-            run = json.loads(path.read_text(encoding="utf-8"))
-            versions.append(summarize_run(run))
-        except (OSError, json.JSONDecodeError):
-            versions.append({"version_id": path.stem})
+        run = _load_run_file(path)
+        versions.append(summarize_run(run) if run is not None else {"version_id": path.stem})
         dest = _trash_path(path, trash_dir)
         path.replace(dest)
         deleted += 1

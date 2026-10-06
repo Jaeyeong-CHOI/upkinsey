@@ -7,13 +7,6 @@ Turn a product brief into persona reactions, market signals, objections, analyst
 
 [한국어](README.md) · [English](README.en.md) · [Demo page](https://upstage.jaeyeong2026.com)
 
-[![Live Demo](https://img.shields.io/badge/demo-upstage.jaeyeong2026.com-7C3AED)](https://upstage.jaeyeong2026.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
-[![Upstage Solar](https://img.shields.io/badge/Powered%20by-Upstage%20Solar-6B5CFF)](https://console.upstage.ai/docs/capabilities/generate/chat)
-[![Nemotron Personas Korea](https://img.shields.io/badge/Persona%20data-Nemotron--Personas--Korea-76B900)](https://huggingface.co/datasets/nvidia/Nemotron-Personas-Korea)
-![Status](https://img.shields.io/badge/status-beta-black)
-
 <img src="assets/readme-constellation.png" alt="Upkinsey constellation view with six synthetic personas" width="960" />
 
 </div>
@@ -57,81 +50,70 @@ Upkinsey lets you paste a product concept, run it against a Korean synthetic per
   </tr>
 </table>
 
+## Status and boundaries
+
+Upkinsey is an early-stage, MIT-licensed beta and welcomes external contributions. Its current scope is a **single-operator, self-hosted research prototype**. It targets Python 3.10+; CI is configured for 3.10–3.14. APIs and saved-run formats are not yet stable contracts.
+
+- Synthetic responses do not replace customer interviews or representative surveys. Scores and panel size are not measured conversion rates or statistical confidence. See [research validity](docs/research-validity.md).
+- The app uses a standard-library Python HTTP server and local JSON files. Jobs and rate limits are process-local; there is no per-user data isolation.
+- The browser UI loads React/Babel and fonts from third-party CDNs, so the default app is not air-gapped. The Python wheel contains the library, not the UI or server scripts.
+- Live simulations need a paid Upstage API key and access to persona data. Tests do not. Demo-page availability is separate from repository maintenance.
+
 ## Quick start
 
-### 1. Clone and install
+### 1. Install and test without an API key
 
 ```bash
 git clone https://github.com/Jaeyeong-CHOI/upkinsey.git
 cd upkinsey
-
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[persona]'
+python -m pip install -e .
+PYTHONPATH=src python -m unittest discover -s tests -p 'test*.py' -v
 ```
 
-### 2. Configure environment
+The core runtime has no third-party Python dependencies. `unittest` is built in; tests do not need credentials, uploaded PDFs, or dataset downloads. Installation may need network access to package repositories. See [contributing](CONTRIBUTING.md) for Windows and frontend checks.
+
+### 2. Configure live simulations
 
 ```bash
+python -m pip install -e '.[persona]'
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` with your own values; do not reuse example passwords:
 
 ```env
-UPSTAGE_API_KEY=your_upstage_api_key
+UPSTAGE_API_KEY=<your_upstage_api_key>
 UPKINSEY_REQUIRE_BASIC_AUTH=1
-UPKINSEY_BASIC_AUTH_USER=operator
-UPKINSEY_BASIC_AUTH_PASSWORD=change-this-password
+UPKINSEY_BASIC_AUTH_USER=<your_operator_name>
+UPKINSEY_BASIC_AUTH_PASSWORD=<a_long_unique_password>
 ```
 
-### 3. Run tests
+Without an API key, live inference cannot run. New persona panels are sampled from Hugging Face and cached locally. Simulations send the product brief and persona context to Upstage; the PDF feature also sends documents to Upstage Document Parse. Start with invented or permitted data and a small panel.
+
+### 3. Start the local app
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -p 'test*.py' -v
+python scripts/run_upkinsey_server.py --host 127.0.0.1 --port 5173
 ```
 
-### 4. Start the app
+Open <http://localhost:5173> and sign in with your configured Basic Auth credentials. The explicit host keeps the server bound to the local interface. Node/npm are not required to serve the app.
 
-```bash
-python scripts/run_upkinsey_server.py --port 5173
-```
+## Docker and deployment
 
-Open:
-
-```text
-http://localhost:5173
-```
-
-## Self-hosting
-
-Upkinsey serves the static prototype and API from one Python server. For public or semi-public deployment, keep the paid [Upstage](https://console.upstage.ai/docs/capabilities/generate/chat) API behind server-side auth and rate limits.
-
-Recommended production defaults:
-
-```env
-UPKINSEY_REQUIRE_BASIC_AUTH=1
-UPKINSEY_ALLOW_DESTRUCTIVE_API=0
-UPKINSEY_MAX_PARALLEL_REQUESTS=2
-UPKINSEY_MAX_ACTIVE_JOBS=2
-UPKINSEY_RATE_LIMIT_PER_MINUTE=30
-UPKINSEY_MAX_BODY_BYTES=1000000
-UPKINSEY_MAX_DOCUMENT_BYTES=8000000
-```
-
-See [`PUBLIC_DEPLOYMENT.md`](PUBLIC_DEPLOYMENT.md) for Render, Docker, auth, persistence, and operational notes.
-
-### Docker
+After replacing the placeholder values in `.env`, run a local container with a named volume for data:
 
 ```bash
 docker build -t upkinsey .
-docker run --rm -p 5173:5173 \
-  -e UPSTAGE_API_KEY="$UPSTAGE_API_KEY" \
-  -e UPKINSEY_REQUIRE_BASIC_AUTH=1 \
-  -e UPKINSEY_BASIC_AUTH_USER=operator \
-  -e UPKINSEY_BASIC_AUTH_PASSWORD=change-this-password \
+docker run --rm --env-file .env \
+  -e UPKINSEY_HOST=0.0.0.0 \
+  -p 127.0.0.1:5173:5173 \
+  -v upkinsey-data:/app/data \
   upkinsey
 ```
+
+An internet-facing deployment needs HTTPS, authentication, filesystem access controls, and backups. Basic Auth is not per-user isolation. See [the deployment guide](PUBLIC_DEPLOYMENT.md) for Render/Docker, proxies, persistence, and operational boundaries.
 
 ## Configuration
 
@@ -145,8 +127,8 @@ docker run --rm -p 5173:5173 \
 | `UPKINSEY_BASIC_AUTH_PASSWORD` | — | Basic Auth password |
 | `UPKINSEY_ALLOW_DESTRUCTIVE_API` | `0` | Enable `DELETE /api/runs*` only when explicitly set |
 | `UPKINSEY_MAX_PARALLEL_REQUESTS` | `2` | Persona API worker parallelism |
-| `UPKINSEY_MAX_ACTIVE_JOBS` | `2` | Process-wide active simulation jobs |
-| `UPKINSEY_RATE_LIMIT_PER_MINUTE` | `30` | Per-client mutating API rate limit |
+| `UPKINSEY_MAX_ACTIVE_JOBS` | `2` | Process-wide concurrent paid operations |
+| `UPKINSEY_RATE_LIMIT_PER_MINUTE` | `30` | Per-peer mutating API rate limit (proxy clients share a budget) |
 | `UPKINSEY_JOB_TTL_SECONDS` | `3600` | In-memory async job snapshot TTL |
 | `UPSTAGE_MAX_RETRIES` | `8` | Retry budget for 429/5xx/transport failures |
 | `UPSTAGE_MIN_REQUEST_INTERVAL_SECONDS` | `1.1` | Process-wide Upstage request spacing |
@@ -168,6 +150,8 @@ Document Parse options are also available in `.env.example` for PDF-to-brief ext
 | `GET` | `/api/runs/compare/{version_id}` | Compare with previous related run |
 
 ## Persona data
+
+The source dataset has its own CC-BY-4.0 license; the MIT code license does not replace its attribution requirements. Install the `persona` extra before sampling.
 
 Upkinsey is designed around [**nvidia/Nemotron-Personas-Korea**](https://huggingface.co/datasets/nvidia/Nemotron-Personas-Korea).
 
@@ -199,27 +183,21 @@ PUBLIC_DEPLOYMENT.md       # Self-hosting and production checklist
 
 - API keys stay server-side in `.env` or deployment secrets.
 - Saved runs are local JSON artifacts under `data/simulation_runs/` and are gitignored.
-- Uploaded PDFs are parsed in-memory by the API flow; do not deploy without reviewing your own retention/compliance requirements.
+- PDF uploads are handled in-memory locally but sent to Upstage Document Parse; review provider data policies before uploading sensitive material.
 - Public deployments should use Basic Auth, job limits, and rate limits because simulations spend paid Upstage quota.
 - Synthetic results should be treated as hypothesis generation, not representative survey data.
 
-## Roadmap
+## Maintenance and contributing
 
-- [ ] Public demo mode with no paid API exposure
-- [ ] Pluggable persona providers
-- [ ] Persistent database/object-store backend for multi-user deployments
-- [ ] Export to Notion/Google Docs/Sheets
-- [ ] CI workflow and container publish pipeline
-- [ ] Admin dashboard for run cost, rate limits, and failure monitoring
+Priorities are reproducible run metadata, evaluation, operational bounds, and accessibility. Discuss maintenance cost and verification before adding large features or integrations.
 
-## Contributing
+- [Contributor guide](CONTRIBUTING.md) — no-key development, tests, and review
+- [Roadmap](docs/roadmap.md) · [Changelog](CHANGELOG.md)
+- [Governance](GOVERNANCE.md) · [Code of conduct](CODE_OF_CONDUCT.md)
+- [Security reporting](SECURITY.md) — do not post vulnerability details publicly
+- [Maintainer guide](docs/maintaining.md) · [OSS comparison](docs/oss-benchmark.md)
 
-This repository is currently in private beta. If you are collaborating on it:
-
-1. Create a branch from `main`.
-2. Run the test suite before opening a PR.
-3. Keep secrets, sampled persona data, and simulation outputs out of git.
-4. Document any new environment variables in `.env.example` and `PUBLIC_DEPLOYMENT.md`.
+Bug fixes, documentation, accessibility, and tests are welcome. Ask questions or propose improvements in [issues](https://github.com/Jaeyeong-CHOI/upkinsey/issues), in Korean or English. There is no guaranteed response or release schedule.
 
 ## Project team
 

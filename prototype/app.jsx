@@ -45,155 +45,7 @@ function clearSession() {
   try { window.localStorage.removeItem(SESSION_KEY); } catch (err) {}
 }
 
-const RESEARCH_TYPE_BY_MODE = {
-  concept: "Concept test",
-  pricing: "Pricing test",
-  message: "Message test",
-  objection: "Objection mining",
-  segment: "Segment discovery"
-};
-
-function asList(value) { return Array.isArray(value) ? value : (value ? [value] : []); }
-function clamp(n, lo = 0, hi = 100) { return Math.max(lo, Math.min(hi, Number(n) || 0)); }
-function shortId(value) { return String(value || "live").replace(/[^a-zA-Z0-9]/g, "").slice(-6) || "live"; }
-function apiPath(path) {
-  return new URL(path, window.location.origin).toString();
-}
-function priceKo(value) {
-  const v = String(value || "보통").toLowerCase();
-  if (v.includes("high") || v.includes("높")) return "높음";
-  if (v.includes("low") || v.includes("낮")) return "낮음";
-  return "보통";
-}
-function parseMeta(meta = "", idx = 0) {
-  const age = Number((String(meta).match(/(\d{2})\s*세/) || [])[1]) || [58,55,42,66,39,52,63,47][idx % 8];
-  const bits = String(meta).split(/[·,/]/).map(s => s.trim()).filter(Boolean);
-  return { age, region: bits.find(b => !/세/.test(b)) || "대한민국", role: bits[bits.length - 1] || "소비자" };
-}
-function toBackendBrief(brief, config = {}) {
-  return {
-    product_name: brief.productName || "제품",
-    description: brief.description || "",
-    features: asList(brief.features),
-    pricing: asList(brief.pricing),
-    target_market: brief.target || "",
-    current_alternatives: brief.alternatives || "",
-    hypothesis: brief.hypothesis || "",
-    research_type: RESEARCH_TYPE_BY_MODE[config.test] || config.research_type || "Concept test",
-    sample_size: Number(config.sampleSize || 8),
-    seed: Number(config.seed || 42)
-  };
-}
-function fromBackendBrief(brief) {
-  return {
-    productName: brief.product_name || brief.productName || "제품",
-    description: brief.description || "",
-    features: asList(brief.features),
-    pricing: asList(brief.pricing),
-    target: brief.target_market || brief.target || "",
-    alternatives: brief.current_alternatives || brief.alternatives || "",
-    hypothesis: brief.hypothesis || ""
-  };
-}
-function canonicalBriefForHash(brief) {
-  return {
-    productName: String(brief?.productName || ""),
-    description: String(brief?.description || ""),
-    features: asList(brief?.features).map(String),
-    pricing: asList(brief?.pricing).map(String),
-    target: String(brief?.target || ""),
-    alternatives: String(brief?.alternatives || ""),
-    hypothesis: String(brief?.hypothesis || ""),
-  };
-}
-function briefFingerprint(brief) {
-  const text = JSON.stringify(canonicalBriefForHash(brief));
-  let hash = 5381;
-  for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash) ^ text.charCodeAt(i);
-  return (hash >>> 0).toString(36);
-}
-function sleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    if (signal) {
-      signal.addEventListener("abort", () => {
-        clearTimeout(timer);
-        reject(new DOMException("aborted", "AbortError"));
-      }, { once: true });
-    }
-  });
-}
-function mapPersona(raw = {}, idx = 0) {
-  const meta = parseMeta(raw.meta, idx);
-  const adoption = clamp(raw.adoption_likelihood ?? raw.adoption ?? 30);
-  const need = clamp(raw.need_fit_score ?? raw.need ?? 30);
-  const understanding = clamp(raw.understanding_score ?? raw.understanding ?? 30);
-  const stance = adoption >= 50 ? "pos" : adoption >= 34 ? "neu" : "neg";
-  return {
-    id: `p${idx + 1}`,
-    name: raw.name || `Persona ${idx + 1}`,
-    age: meta.age,
-    region: raw.region || meta.region,
-    role: raw.role || meta.role,
-    stance,
-    stanceLabel: raw.stance || (stance === "pos" ? "긍정적으로 검토" : stance === "neu" ? "정보가 더 필요" : "회의적"),
-    buyCondition: raw.buy_condition || raw.buyCondition || raw.next_validation_question || "추가 근거 확인 후 판단",
-    adoption, need, understanding,
-    price: priceKo(raw.price_resistance || raw.price),
-    core: raw.concern || raw.core || raw.reply || "아직 핵심 반응이 없습니다.",
-    drivers: asList(raw.positive_drivers || raw.drivers),
-    risks: asList(raw.top_risks || raw.risks),
-    nextQ: raw.next_validation_question || raw.nextQ || "어떤 근거가 있으면 다음 행동으로 넘어갈 수 있나요?",
-    sourceContext: raw.persona_context || raw.source_context || null,
-    usedPersonaFields: asList(raw.used_persona_fields),
-    x: 12 + ((idx * 37) % 76),
-    y: 18 + ((idx * 29) % 64),
-    size: Math.max(42, Math.min(72, 42 + adoption * 0.42)),
-    __raw: raw
-  };
-}
-function mapResultToResonance(result, brief, versions = []) {
-  const dist = result?.reaction_distribution || {};
-  const personas = asList(result?.persona_reactions || result?.personas).map(mapPersona);
-  const adoption = clamp(result?.adoption_score ?? 0);
-  const need = clamp(result?.need_fit_score ?? 0);
-  const evidence = result?.evidence_quality || result?.report?.evidence_quality || {};
-  const requestBudget = result?.request_budget || result?.report?.request_budget || {};
-  const version = result?.version || {};
-  const currentVersion = {
-    id: version.version_id || "live",
-    shortId: shortId(version.version_id),
-    name: brief.productName || version.product_name || "제품",
-    type: version.research_type || result?.research_type || "Concept test",
-    time: "방금 저장됨",
-    adoption,
-    need,
-    price: priceKo(result?.price_risk),
-    decision: result?.report?.decision_board?.recommendation || version.decision || "다듬기",
-    evidence: `${evidence.score ?? version.evidence_quality_score ?? "-"}점`,
-    calls: `${requestBudget.actual_persona_count ?? personas.length}명 / ${requestBudget.requested_sample_size ?? personas.length}명`,
-    panel: result?.panel_profile?.selection_mode || "필터 없음",
-    warnings: (evidence.warnings || []).length || version.evidence_warning_count || 0,
-    current: true
-  };
-  const mappedVersions = versions.length ? versions : [currentVersion];
-  return {
-    brief,
-    signals: {
-      adoption: { value: adoption, delta: version.adoption_delta ?? 0, prev: Math.max(0, adoption - 5) },
-      needFit: { value: need, delta: version.need_fit_delta ?? 0, prev: Math.max(0, need - 3) },
-      priceRisk: { value: priceKo(result?.price_risk), changed: false, prev: "보통" },
-      evidenceQuality: { value: evidence.score ?? 50, delta: 0 },
-      distribution: { positive: Number(dist.positive ?? 0), neutral: Number(dist.neutral ?? 0), negative: Number(dist.negative ?? 0) },
-      calls: { done: personas.length, total: personas.length, batches: requestBudget.planned_batches ?? "-" },
-      warnings: (evidence.warnings || []).length,
-      decision: { current: currentVersion.decision, prev: currentVersion.decision }
-    },
-    versions: mappedVersions,
-    personas: personas.length ? personas : RESONANCE_DATA.personas,
-    result
-  };
-}
+const { asList, clamp, shortId, apiPath, priceKo, parseMeta, toBackendBrief, fromBackendBrief, canonicalBriefForHash, briefFingerprint, sleep, mapPersona, mapResultToResonance, readApiResponse, scoreLabel, personaBio } = window.UpkinseyUI;
 
 function NoResultScreen({ goRun, message = "먼저 제품 정보를 입력하고 시뮬레이션을 실행해주세요." }) {
   return (
@@ -231,8 +83,8 @@ function Nav({ current, setCurrent, savedTime, apiState, onReset }) {
           })}
         </div>
         <div className="nav-right">
-          <div className="live-pill" title={apiState.detail || "실시간 API 상태"}>
-            <div className="live-dot"></div><span>{apiState.label || "Live API"}</span><span className="ver">· 세션 자동 저장</span>
+          <div className="live-pill" role="status" aria-live="polite" title={apiState.detail || "실시간 API 상태"}>
+            <div className="live-dot" data-status={apiState.status || "checking"} aria-hidden="true"></div><span>{apiState.label || "Live API"}</span><span className="ver">· 세션 자동 저장</span>
           </div>
           <button className="reset-pill" onClick={onReset} title="현재 브라우저에 저장된 세션을 지우고 새로 시작">새 세션</button>
         </div>
@@ -262,14 +114,14 @@ function App() {
   const [result, setResult] = useState(() => restoredSession.result || null);
   const [analystResult, setAnalystResult] = useState(() => restoredSession.analystResult || null);
   const [parseStatus, setParseStatus] = useState(null);
-  const [apiState, setApiState] = useState({ label: "API 확인 중", detail: "Solar backend 상태 확인 중" });
+  const [apiState, setApiState] = useState({ status: "checking", label: "API 확인 중", detail: "Solar backend 상태 확인 중" });
   const [error, setError] = useState("");
 
   const currentBriefHash = briefFingerprint(brief);
   const resultStale = Boolean(result && result.__briefHash !== currentBriefHash);
   const liveResult = result && !resultStale ? result : null;
   const liveData = liveResult ? mapResultToResonance(liveResult, brief) : RESONANCE_DATA;
-  const personas = liveData.personas || RESONANCE_DATA.personas;
+  const personas = liveResult ? liveData.personas : [];
   const goTo = (id) => {
     if (RESULT_LAYERS.has(id) && !liveResult) {
       setCurrent("run");
@@ -284,6 +136,9 @@ function App() {
     activeAbortRef.current = null;
   };
   const updateBrief = (next) => {
+    cancelActiveRun();
+    setRunning(false);
+    setProgress(null);
     setBrief(prev => (typeof next === "function" ? next(prev) : next));
     setResult(null);
     setAnalystResult(null);
@@ -309,7 +164,7 @@ function App() {
 
   useEffect(() => { document.documentElement.dataset.theme = tweaks.theme; }, [tweaks.theme]);
   useEffect(() => { window.scrollTo({ top: 0, behavior: "smooth" }); }, [current]);
-  useEffect(() => { checkApiHealth(); }, []);
+  useEffect(() => { checkApiHealth(); return () => { cancelActiveRun(); if (analystProgressTimerRef.current) clearInterval(analystProgressTimerRef.current); }; }, []);
   useEffect(() => {
     if (RESULT_LAYERS.has(current) && !liveResult) setCurrent("run");
   }, [current, liveResult]);
@@ -320,12 +175,11 @@ function App() {
   async function checkApiHealth() {
     try {
       const response = await fetch(apiPath("/api/health"));
-      if (!response.ok) throw new Error(`API ${response.status}`);
-      const health = await response.json();
+      const health = await readApiResponse(response);
       if (!health.ok) throw new Error("API key missing");
-      setApiState({ label: "Live API Ready", detail: `${health.model || "solar-pro3"} · ${health.runs ?? 0} saved runs` });
+      setApiState({ status: "ready", label: "Live API Ready", detail: `${health.model || "solar-pro3"} · ${health.runs ?? 0} saved runs` });
     } catch (err) {
-      setApiState({ label: "API Not Ready", detail: String(err.message || err) });
+      setApiState({ status: "error", label: "API Not Ready", detail: String(err.message || err) });
     }
   }
 
@@ -335,8 +189,7 @@ function App() {
       if (activeRunRef.current !== runToken) throw new DOMException("stale run ignored", "AbortError");
       if (Date.now() - started > 20 * 60 * 1000) throw new Error("시뮬레이션 시간이 너무 오래 걸려 중단했어요. 패널 크기를 줄이거나 잠시 후 다시 시도해주세요.");
       const response = await fetch(apiPath(`/api/simulate/jobs/${encodeURIComponent(jobId)}`), { signal });
-      if (!response.ok) throw new Error(`Job API ${response.status}`);
-      const job = await response.json();
+      const job = await readApiResponse(response);
       if (activeRunRef.current === runToken) setProgress(job);
       if (job.status === "done") return job.result;
       if (job.status === "error") throw new Error(job.message || job.error || "simulation failed");
@@ -358,8 +211,7 @@ function App() {
       const form = new FormData();
       form.append("file", file, file.name || "document.pdf");
       const response = await fetch(apiPath("/api/document-brief"), { method: "POST", body: form });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data.error) throw new Error(data.message || data.error || `Document Parse API ${response.status}`);
+      const data = await readApiResponse(response);
       const extracted = data.brief || {};
       setBrief(prev => ({
         ...prev,
@@ -379,7 +231,7 @@ function App() {
         evidence: extracted.evidence || [],
         textLength: data.document_parse?.text_length || 0,
       });
-      setApiState({ label: "Live API Ready", detail: "Document Parse 완료" });
+      setApiState({ status: "ready", label: "Live API Ready", detail: "Document Parse 완료" });
       return data;
     } catch (err) {
       setParseStatus({ state: "error", message: String(err.message || err) });
@@ -397,24 +249,22 @@ function App() {
     setError("");
     setAnalystResult(null);
     setResult(null);
-    setApiState({ label: "API 실행 중", detail: "Solar Pro 3 persona 응답 생성 중" });
+    setApiState({ status: "busy", label: "API 실행 중", detail: "Solar Pro 3 persona 응답 생성 중" });
     try {
       const backendBrief = toBackendBrief(brief, config);
       const runBriefHash = briefFingerprint(brief);
       const response = await fetch(apiPath("/api/simulate/start"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(backendBrief), signal: controller.signal });
-      if (!response.ok) throw new Error(`API ${response.status}`);
-      const job = await response.json();
-      if (job.error) throw new Error(job.message || job.error);
+      const job = await readApiResponse(response);
       const payload = await pollJob(job.job_id, runToken, controller.signal);
       if (activeRunRef.current !== runToken) return;
       const ownedPayload = { ...payload, __briefHash: runBriefHash };
       setResult(ownedPayload);
-      setApiState({ label: "방금 저장됨", detail: ownedPayload?.version?.version_id || "simulation complete" });
+      setApiState({ status: "ready", label: "방금 저장됨", detail: ownedPayload?.version?.version_id || "simulation complete" });
       setCurrent("signals");
     } catch (err) {
-      if (err?.name === "AbortError") return;
+      if (err?.name === "AbortError" || activeRunRef.current !== runToken) return;
       setError(String(err.message || err));
-      setApiState({ label: "API 실패", detail: String(err.message || err) });
+      setApiState({ status: "error", label: "API 실패", detail: String(err.message || err) });
     } finally {
       if (activeRunRef.current === runToken) {
         activeRunRef.current = null;
@@ -451,9 +301,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ brief: toBackendBrief(brief, {}), question, persona_reactions: liveResult.persona_reactions || liveResult.personas || [], target_limit: 4, max_rounds: 5 })
       });
-      if (!response.ok) throw new Error(`Analyst API ${response.status}`);
-      const data = await response.json();
-      if (data.error) throw new Error(data.message || data.error);
+      const data = await readApiResponse(response);
       setAnalystProgress({ percent: 100, message: "분석가 인터뷰 결과를 정리했어요" });
       setAnalystResult(data);
       return data;
@@ -473,15 +321,13 @@ function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ brief: toBackendBrief(brief, {}), persona: persona.__raw || persona, message, history: history.slice(-8) })
     });
-    if (!response.ok) throw new Error(`Chat API ${response.status}`);
-    const data = await response.json();
-    if (data.error) throw new Error(data.message || data.error);
+    const data = await readApiResponse(response);
     return data.reply;
   }
 
   return (
     <>
-      <Nav current={current} setCurrent={setCurrent} savedTime={apiState.label} apiState={apiState} onReset={resetSession} />
+      <Nav current={current} setCurrent={goTo} savedTime={apiState.label} apiState={apiState} onReset={resetSession} />
       <main className="shell">
         {error && <div className="callout" style={{ marginTop: 24 }}><div className="callout-eyebrow">API 오류</div><div className="callout-text">{error}</div></div>}
         {resultStale && <div className="callout" style={{ marginTop: 24 }}><div className="callout-eyebrow">결과 숨김</div><div className="callout-text">제품 정보가 바뀌어 이전 시뮬레이션 결과를 표시하지 않습니다. 새로 실행해주세요.</div></div>}
@@ -492,6 +338,7 @@ function App() {
         {current === "analyst"  && (liveResult ? <AnalystScreen result={liveResult} analystResult={analystResult} onAsk={askAnalyst} goBack={() => goTo("personas")} goNext={() => goTo("report")} /> : <NoResultScreen goRun={() => goTo("run")} />)}
         {current === "report"   && (liveResult ? <ReportScreen result={liveResult} data={liveData} goBack={() => goTo("analyst")} goRestart={resetSession} /> : <NoResultScreen goRun={() => goTo("run")} />)}
       </main>
+      <footer className="shell" style={{ padding: "24px 0", color: "var(--text-3)", fontSize: 12 }}>합성 응답은 실제 소비자 조사나 구매 확률이 아닙니다. · <a href="https://github.com/Jaeyeong-CHOI/upkinsey" target="_blank" rel="noopener noreferrer">GitHub · 기여하기</a></footer>
       {running && <SimulationOverlay progress={progress} title="시장에 제품을 던지고 있어요" defaultMessage="합성 응답자가 제품을 처음 듣고 있어요…" />}
       {analystRunning && <SimulationOverlay progress={analystProgress} title="분석가가 인터뷰를 진행하고 있어요" defaultMessage="응답자를 고르고 질문을 다시 설계하는 중…" />}
       <TweaksPanel title="Tweaks">
