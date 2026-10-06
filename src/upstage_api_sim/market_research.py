@@ -1,20 +1,79 @@
-"""Market research simulation prompt + response helpers.
+"""Research artifact aggregation and model-call orchestration.
 
 The simulation sends persona-level Upstage requests in parallel whenever possible
 and only aggregates after all independent persona calls return.
+
+Pure input normalization, Markdown export, and interview planning live in their
+own modules. Their established names are reexported here so existing callers do
+not need to change imports; model-call entry points remain patchable here.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import time
+from datetime import datetime, timezone
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from difflib import SequenceMatcher
 from typing import Any, Callable
 
+# Compatibility facade: keep established imports while pure modules stay acyclic.
+from .research_inputs import (
+    KOREA_PROVINCES as KOREA_PROVINCES,
+    PRICE_RISK_SCORE as PRICE_RISK_SCORE,
+    TARGET_SEGMENT_KEYWORDS as TARGET_SEGMENT_KEYWORDS,
+    _as_int as _as_int,
+    _bounded_list as _bounded_list,
+    _contains_any as _contains_any,
+    _dedupe_key as _dedupe_key,
+    _dedupe_preserve_order as _dedupe_preserve_order,
+    _extract_json as _extract_json,
+    _first_text as _first_text,
+    _infer_age_bounds_from_text as _infer_age_bounds_from_text,
+    _listify as _listify,
+    _normalize_persona_filters as _normalize_persona_filters,
+    _persona_age as _persona_age,
+    _persona_search_text as _persona_search_text,
+    _price_risk_score as _price_risk_score,
+    _segment_persona_label as _segment_persona_label,
+    _shorten as _shorten,
+    infer_persona_filters_from_brief as infer_persona_filters_from_brief,
+    normalize_persona_for_prompt as normalize_persona_for_prompt,
+    persona_context_for_result as persona_context_for_result,
+    persona_filter_score as persona_filter_score,
+    persona_meta as persona_meta,
+    select_personas_for_brief as select_personas_for_brief,
+    unique_top as unique_top,
+    validate_brief as validate_brief,
+)
+from .report_markdown import (
+    _markdown_bullets as _markdown_bullets,
+    _markdown_escape as _markdown_escape,
+    format_report_markdown as format_report_markdown,
+)
+from .interview_planning import (
+    _analyst_information_coverage as _analyst_information_coverage,
+    _asked_phases as _asked_phases,
+    _clean_interview_followup as _clean_interview_followup,
+    _normalize_chat_history as _normalize_chat_history,
+    _normalized_contains as _normalized_contains,
+    _normalized_similarity as _normalized_similarity,
+    _persona_question_match_score as _persona_question_match_score,
+    _probe as _probe,
+    _question_signal_keywords as _question_signal_keywords,
+    _select_probe_question as _select_probe_question,
+    _short_quote as _short_quote,
+    _synthesize_analyst_interviews as _synthesize_analyst_interviews,
+    build_analyst_question_plan as build_analyst_question_plan,
+    build_custom_analyst_followup as build_custom_analyst_followup,
+    build_persona_chat_prompt as build_persona_chat_prompt,
+    select_analyst_target_personas as select_analyst_target_personas,
+)
+
 from .upstage_client import UpstageClient
+from .provenance import build_provenance
 
 SAMPLE_PERSONAS = [
     {
@@ -70,367 +129,6 @@ PERSONA_RESPONSE_SCHEMA = """
 """.strip()
 
 
-def _extract_json(text: str) -> dict[str, Any]:
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.S)
-        if not match:
-            raise
-        data = json.loads(match.group(0))
-    if not isinstance(data, dict):
-        raise ValueError("Model response must be a JSON object")
-    return data
-
-
-def _as_int(value: Any, *, default: int = 0, min_value: int = 0, max_value: int = 100) -> int:
-    try:
-        parsed = int(round(float(value)))
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    return max(min_value, min(max_value, parsed))
-
-
-def _listify(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item) for item in value if str(item).strip()]
-    if value is None:
-        return []
-    return [str(value)] if str(value).strip() else []
-
-
-def _bounded_list(value: Any, *, limit: int = 12, item_limit: int = 80) -> list[str]:
-    return [str(item).strip()[:item_limit] for item in _listify(value) if str(item).strip()][:limit]
-
-
-def _first_text(*values: Any) -> str:
-    for value in values:
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            return text
-    return ""
-
-
-def _shorten(value: Any, *, limit: int = 600) -> str:
-    text = _first_text(value)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
-
-
-def persona_meta(persona: dict[str, Any]) -> str:
-    """Return a compact display label for built-in or Nemotron personas."""
-
-    demographics = persona.get("demographics") if isinstance(persona.get("demographics"), dict) else {}
-    age = _first_text(persona.get("age"), demographics.get("age"))
-    province = _first_text(persona.get("province"), demographics.get("province"))
-    occupation = _first_text(persona.get("occupation"), demographics.get("occupation"))
-    parts = []
-    if age:
-        parts.append(f"{age}세" if age.isdigit() else age)
-    if province:
-        parts.append(province)
-    if occupation:
-        parts.append(occupation)
-    return " · ".join(parts) or "합성 페르소나"
-
-
-def normalize_persona_for_prompt(persona: dict[str, Any]) -> dict[str, Any]:
-    """Flatten compact Nemotron rows into the prompt shape used by the simulator.
-
-    The Nemotron sampler stores demographics and rich life-domain prose in nested
-    sections. This keeps the prompt small and consistent while preserving enough
-    context for product fit judgments.
-    """
-
-    demographics = persona.get("demographics") if isinstance(persona.get("demographics"), dict) else {}
-    life_domains = persona.get("life_domains") if isinstance(persona.get("life_domains"), dict) else {}
-    capabilities = persona.get("capabilities") if isinstance(persona.get("capabilities"), dict) else {}
-    interests = persona.get("interests") if isinstance(persona.get("interests"), dict) else {}
-
-    return {
-        "name": _first_text(persona.get("name")) or "Persona",
-        "meta": persona_meta(persona),
-        "age": persona.get("age", demographics.get("age")),
-        "province": _first_text(persona.get("province"), demographics.get("province")),
-        "occupation": _first_text(persona.get("occupation"), demographics.get("occupation")),
-        "persona": _shorten(persona.get("persona"), limit=900),
-        "family_context": _shorten(life_domains.get("family"), limit=500),
-        "professional_context": _shorten(life_domains.get("professional"), limit=500),
-        "interests": _listify(interests.get("hobbies_list"))[:8],
-        "capabilities": _listify(capabilities.get("skills_list"))[:8],
-        "goals": _shorten(persona.get("goals"), limit=500),
-        "source": {
-            "dataset_id": persona.get("dataset_id"),
-            "uuid": persona.get("uuid"),
-            "name_parse_confidence": (persona.get("name_parse") or {}).get("confidence")
-            if isinstance(persona.get("name_parse"), dict)
-            else None,
-        },
-    }
-
-
-def persona_context_for_result(persona: dict[str, Any]) -> dict[str, Any]:
-    """Return the exact compact persona context that was shown to the model.
-
-    This is intentionally not the full raw Nemotron row. It mirrors
-    `normalize_persona_for_prompt()` so the UI can explain why a respondent
-    reacted a certain way without exposing unused source fields.
-    """
-
-    normalized = normalize_persona_for_prompt(persona)
-    return {
-        key: value
-        for key, value in normalized.items()
-        if value not in (None, "", [], {})
-    }
-
-
-def _persona_age(persona: dict[str, Any]) -> int | None:
-    demographics = persona.get("demographics") if isinstance(persona.get("demographics"), dict) else {}
-    value = persona.get("age", demographics.get("age"))
-    if value is None:
-        return None
-    match = re.search(r"\d+", str(value))
-    return int(match.group(0)) if match else None
-
-
-def _persona_search_text(persona: dict[str, Any]) -> str:
-    """Return compact text used for deterministic target-panel ranking."""
-
-    normalized = normalize_persona_for_prompt(persona)
-    parts: list[str] = []
-    for key in ("name", "meta", "province", "occupation", "persona", "family_context", "professional_context", "goals"):
-        parts.append(_first_text(normalized.get(key)))
-    parts.extend(_listify(normalized.get("interests")))
-    parts.extend(_listify(normalized.get("capabilities")))
-
-    demographics = persona.get("demographics") if isinstance(persona.get("demographics"), dict) else {}
-    life_domains = persona.get("life_domains") if isinstance(persona.get("life_domains"), dict) else {}
-    for value in [*demographics.values(), *life_domains.values()]:
-        parts.append(_shorten(value, limit=500))
-    return " ".join(part for part in parts if part).lower()
-
-
-def _normalize_persona_filters(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-
-    filters = {
-        "occupations": _bounded_list(value.get("occupations"), limit=20),
-        "provinces": _bounded_list(value.get("provinces"), limit=20),
-        "keywords": _bounded_list(value.get("keywords"), limit=30),
-        "exclude_keywords": _bounded_list(value.get("exclude_keywords"), limit=20),
-    }
-    if value.get("age_min") is not None:
-        filters["age_min"] = _as_int(value.get("age_min"), default=0, min_value=0, max_value=120)
-    if value.get("age_max") is not None:
-        filters["age_max"] = _as_int(value.get("age_max"), default=120, min_value=0, max_value=120)
-    if value.get("panel_limit") is not None:
-        filters["panel_limit"] = _as_int(value.get("panel_limit"), default=50, min_value=1, max_value=200)
-    return {key: val for key, val in filters.items() if val not in ([], None, "")}
-
-
-
-TARGET_SEGMENT_KEYWORDS: list[tuple[tuple[str, ...], dict[str, list[str]]]] = [
-    (("카페", "음식점", "식당", "소상공인", "자영업", "사장"), {
-        "occupations": ["카페", "음식점", "식당", "자영업", "소상공인", "사장"],
-        "keywords": ["매장", "고객", "리뷰", "운영", "동네"],
-    }),
-    (("리뷰", "답글", "평점"), {
-        "keywords": ["리뷰", "답글", "평점", "고객 응대", "반복 불만"],
-    }),
-    (("병원", "진료", "환자", "만성질환", "보호자"), {
-        "occupations": ["보호자", "간병", "의료"],
-        "keywords": ["병원", "진료", "대기", "보호자", "만성질환", "건강"],
-    }),
-    (("복약", "약", "시니어", "고령", "노인", "어르신"), {
-        "keywords": ["복약", "건강", "가족", "보호자", "알림"],
-    }),
-    (("학생", "대학생", "청년"), {
-        "occupations": ["학생", "대학생"],
-        "keywords": ["학교", "학업", "청년"],
-    }),
-    (("직장인", "회사원", "오피스", "출퇴근"), {
-        "occupations": ["직장인", "회사원", "사무"],
-        "keywords": ["출퇴근", "회사", "업무"],
-    }),
-    (("수리", "기사", "견적", "동네"), {
-        "occupations": ["자영업", "기술", "수리"],
-        "keywords": ["수리", "견적", "동네", "지인", "신뢰"],
-    }),
-    (("정책", "복지", "주민센터", "지원금"), {
-        "keywords": ["정책", "복지", "주민센터", "지원금", "지역"],
-    }),
-    (("식단", "냉장고", "요리", "건강관리"), {
-        "keywords": ["식단", "요리", "냉장고", "건강", "가족"],
-    }),
-]
-
-KOREA_PROVINCES = [
-    "서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종",
-    "경기", "강원", "충북", "충청북도", "충남", "충청남도", "전북", "전라북도",
-    "전남", "전라남도", "경북", "경상북도", "경남", "경상남도", "제주",
-]
-
-
-def _dedupe_preserve_order(values: list[str], *, limit: int) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for value in values:
-        text = str(value).strip()
-        key = text.lower()
-        if not text or key in seen:
-            continue
-        seen.add(key)
-        out.append(text[:80])
-        if len(out) >= limit:
-            break
-    return out
-
-
-def _infer_age_bounds_from_text(text: str) -> dict[str, int]:
-    bounds: dict[str, int] = {}
-    ranges = re.findall(r"(\d{2})\s*[-~–]\s*(\d{2})대", text)
-    if ranges:
-        lows = [int(start) for start, _ in ranges]
-        highs = [int(end) + 9 for _, end in ranges]
-        bounds["age_min"] = max(0, min(lows))
-        bounds["age_max"] = min(120, max(highs))
-        return bounds
-
-    decades = [int(value) for value in re.findall(r"(\d{2})대", text)]
-    if decades:
-        bounds["age_min"] = max(0, min(decades))
-        bounds["age_max"] = min(120, max(decades) + 9)
-    if any(keyword in text for keyword in ("시니어", "고령", "노인", "어르신", "은퇴")):
-        bounds["age_min"] = max(int(bounds.get("age_min", 0)), 60)
-    return bounds
-
-
-def infer_persona_filters_from_brief(brief: dict[str, Any]) -> dict[str, Any]:
-    """Infer lightweight target-panel filters from a natural-language brief.
-
-    The prototype UI asks for target_market/current alternatives but not raw
-    persona_filters. This helper keeps runs target-aware without another model
-    call: it only extracts conservative occupation, province, keyword, and age
-    hints from the brief. Explicit persona_filters always take precedence.
-    """
-
-    normalized = validate_brief(brief)
-    if normalized.get("persona_filters"):
-        return {}
-
-    text = " ".join(
-        str(normalized.get(key) or "")
-        for key in ("product_name", "description", "target_market", "hypothesis", "current_alternatives")
-    )
-    text += " " + " ".join(_listify(normalized.get("features")))
-    lowered = text.lower()
-
-    occupations: list[str] = []
-    keywords: list[str] = []
-    for needles, payload in TARGET_SEGMENT_KEYWORDS:
-        if any(needle.lower() in lowered for needle in needles):
-            occupations.extend(payload.get("occupations", []))
-            keywords.extend(payload.get("keywords", []))
-
-    provinces = [province for province in KOREA_PROVINCES if province.lower() in lowered]
-    inferred: dict[str, Any] = {
-        "occupations": _dedupe_preserve_order(occupations, limit=12),
-        "provinces": _dedupe_preserve_order(provinces, limit=8),
-        "keywords": _dedupe_preserve_order(keywords, limit=18),
-    }
-    inferred.update(_infer_age_bounds_from_text(text))
-    inferred = _normalize_persona_filters(inferred)
-    if not any(inferred.get(key) for key in ("occupations", "provinces", "keywords")) and not (
-        "age_min" in inferred or "age_max" in inferred
-    ):
-        return {}
-    return inferred
-
-def persona_filter_score(persona: dict[str, Any], filters: dict[str, Any]) -> int:
-    """Score how well a persona matches product-specific target filters.
-
-    Age bounds and exclude keywords are hard gates. Other fields are positive
-    ranking signals so small panels do not become empty accidentally.
-    """
-
-    if not filters:
-        return 0
-
-    age = _persona_age(persona)
-    if age is not None:
-        if "age_min" in filters and age < int(filters["age_min"]):
-            return -1
-        if "age_max" in filters and age > int(filters["age_max"]):
-            return -1
-
-    text = _persona_search_text(persona)
-    if any(keyword.lower() in text for keyword in filters.get("exclude_keywords", [])):
-        return -1
-
-    score = 0
-    demographics = persona.get("demographics") if isinstance(persona.get("demographics"), dict) else {}
-    occupation = _first_text(persona.get("occupation"), demographics.get("occupation")).lower()
-    province = _first_text(persona.get("province"), demographics.get("province")).lower()
-    for keyword in filters.get("occupations", []):
-        needle = keyword.lower()
-        if needle and (needle in occupation or needle in text):
-            score += 4
-    for keyword in filters.get("provinces", []):
-        needle = keyword.lower()
-        if needle and (needle in province or needle in text):
-            score += 2
-    for keyword in filters.get("keywords", []):
-        needle = keyword.lower()
-        if needle and needle in text:
-            score += 1
-    return score
-
-
-def select_personas_for_brief(personas: list[dict[str, Any]], brief: dict[str, Any]) -> list[dict[str, Any]]:
-    """Rank a panel using product-specific persona filters without shrinking sample_size.
-
-    Target filters should prioritize the best-fit personas, not silently reduce a
-    requested 30-person run to the 3 personas that match inferred age/keyword
-    hints. Only an explicit `panel_limit` is allowed to trim the panel below the
-    requested `sample_size`.
-    """
-
-    filters = brief.get("persona_filters") if isinstance(brief.get("persona_filters"), dict) else {}
-    if not filters:
-        return personas
-
-    requested = _as_int(brief.get("sample_size"), default=len(personas), min_value=1, max_value=500)
-    explicit_panel_limit = filters.get("panel_limit") is not None
-    target_size = int(filters.get("panel_limit") if explicit_panel_limit else requested)
-    target_size = max(1, min(target_size, len(personas)))
-
-    scored: list[tuple[int, int, dict[str, Any]]] = []
-    fallback: list[tuple[int, dict[str, Any]]] = []
-    for index, persona in enumerate(personas):
-        score = persona_filter_score(persona, filters)
-        if score >= 0:
-            scored.append((score, index, persona))
-        elif not explicit_panel_limit:
-            # Age bounds are useful ranking hints for inferred target panels, but
-            # they must not cut a user-requested sample short. Keep explicit
-            # exclude_keywords as hard exclusions even when filling the panel.
-            text = _persona_search_text(persona)
-            if not any(keyword.lower() in text for keyword in filters.get("exclude_keywords", [])):
-                fallback.append((index, persona))
-    if not scored:
-        return [persona for _, persona in fallback[:target_size]] or personas[:target_size]
-
-    ranked = [persona for score, _, persona in sorted(scored, key=lambda item: (-item[0], item[1]))]
-    if len(ranked) < target_size and not explicit_panel_limit:
-        ranked.extend(persona for _, persona in fallback if persona not in ranked)
-    return ranked[:target_size]
-
-
 OBJECTION_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("가격 부담", ("가격", "비용", "결제", "구독", "유료", "월", "수수료", "부담")),
     ("신뢰 부족", ("신뢰", "믿", "정확", "검증", "근거", "품질", "보상 기준", "투명")),
@@ -453,8 +151,6 @@ OBJECTION_FIXES = {
     "대체재가 이미 충분함": "기존 대안 대비 더 빠르거나 안전한 전환 계기를 한 가지로 집중",
 }
 
-PRICE_RISK_SCORE = {"Low": 0, "Low-Medium": 1, "Medium": 2, "High": 3}
-
 
 def classify_objection(text: str) -> str:
     """Classify a free-text risk into a stable objection category."""
@@ -468,44 +164,6 @@ def classify_objection(text: str) -> str:
             best_category = category
             best_score = score
     return best_category
-
-
-def _dedupe_key(text: str) -> str:
-    lowered = text.lower()
-    replacements = {
-        "구독료": "가격",
-        "요금": "가격",
-        "비용": "가격",
-        "유료": "가격",
-        "결제": "가격",
-        "신뢰도": "신뢰",
-        "믿기": "신뢰",
-        "정확도": "신뢰",
-        "개인 정보": "개인정보",
-        "데이터": "개인정보",
-        "설치": "사용법",
-        "복잡함": "복잡",
-        "어려움": "어렵",
-    }
-    for old, new in replacements.items():
-        lowered = lowered.replace(old, new)
-    return re.sub(r"[^0-9a-z가-힣]+", "", lowered)
-
-
-def unique_top(items: list[str], limit: int = 4) -> list[str]:
-    """Return stable top items while collapsing near-duplicate phrasing."""
-
-    seen: set[str] = set()
-    out: list[str] = []
-    for raw_item in items:
-        item = str(raw_item).strip()
-        key = _dedupe_key(item)
-        if item and key and key not in seen:
-            seen.add(key)
-            out.append(item)
-        if len(out) >= limit:
-            break
-    return out
 
 
 def unique_top_risks(items: list[str], limit: int = 4) -> list[str]:
@@ -568,10 +226,6 @@ def mine_objections(reactions: list[dict[str, Any]], limit: int = 5) -> list[dic
     ]
 
 
-def _price_risk_score(label: Any) -> int:
-    return PRICE_RISK_SCORE.get(str(label), 2)
-
-
 def _common_price_risk(reactions: list[dict[str, Any]]) -> str:
     if not reactions:
         return "Medium"
@@ -616,11 +270,6 @@ def _first_counter_item(items: list[str], fallback: str) -> str:
     if not counts:
         return fallback
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
-
-
-def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
-    lowered = text.lower()
-    return any(keyword.lower() in lowered for keyword in keywords)
 
 
 def assess_brief_quality(brief: dict[str, Any]) -> dict[str, Any]:
@@ -731,12 +380,6 @@ def assess_brief_quality(brief: dict[str, Any]) -> dict[str, Any]:
         "strengths": unique_top(strengths, limit=5),
         "recommended_questions": unique_top(recommended_questions, limit=5),
     }
-
-
-def _segment_persona_label(reaction: dict[str, Any]) -> str:
-    name = _first_text(reaction.get("name"), "Persona")
-    meta = _first_text(reaction.get("meta"))
-    return f"{name} ({meta})" if meta else name
 
 
 def build_segment_recommendations(
@@ -1915,7 +1558,6 @@ def build_recruiting_screener(
     }
 
 
-
 def build_interview_discussion_guide(
     brief: dict[str, Any],
     reactions: list[dict[str, Any]],
@@ -2705,7 +2347,6 @@ def build_next_run_brief_variants(
     return ranked[: max(1, min(limit, len(ranked)))]
 
 
-
 def build_research_sprint(
     brief: dict[str, Any],
     *,
@@ -2861,7 +2502,6 @@ def build_research_sprint(
         "decision_gate": decision_gate,
         "next_review_checkpoint": "Day 5 decision memo + updated Upkinsey rerun brief",
     }
-
 
 
 def build_message_angle_tests(
@@ -3444,7 +3084,7 @@ def build_request_budget(
 
     return {
         "mode": "bounded_parallel_persona_calls",
-        "model": "Upstage Solar Pro 3",
+        "model": "not reported",
         "requested_sample_size": requested_sample_size,
         "actual_persona_count": count,
         "solar_persona_calls": count,
@@ -3564,42 +3204,6 @@ def build_founder_decision_memo(
     }
 
 
-def validate_brief(brief: dict[str, Any]) -> dict[str, Any]:
-    """Normalize and bound user-provided brief before it reaches the API."""
-
-    if not isinstance(brief, dict):
-        raise ValueError("brief must be an object")
-
-    def text_field(name: str, default: str = "") -> str:
-        value = brief.get(name, default)
-        if value is None:
-            return default
-        if isinstance(value, list):
-            value = ", ".join(str(item) for item in value)
-        return str(value).strip()[:2000]
-
-    sample_size = _as_int(brief.get("sample_size", 100), default=100, min_value=1, max_value=500)
-    seed = _as_int(brief.get("seed", 42), default=42, min_value=0, max_value=2_147_483_647)
-    filter_source = text_field("persona_filter_source")
-    if filter_source not in {"user", "inferred_target_market"}:
-        filter_source = "user" if isinstance(brief.get("persona_filters"), dict) and brief.get("persona_filters") else ""
-
-    return {
-        "product_name": text_field("product_name", "제품") or "제품",
-        "description": text_field("description"),
-        "features": _listify(brief.get("features"))[:12],
-        "pricing": _listify(brief.get("pricing"))[:8],
-        "target_market": text_field("target_market"),
-        "hypothesis": text_field("hypothesis"),
-        "current_alternatives": text_field("current_alternatives"),
-        "research_type": text_field("research_type", "Concept test") or "Concept test",
-        "sample_size": sample_size,
-        "seed": seed,
-        "persona_filters": _normalize_persona_filters(brief.get("persona_filters")),
-        "persona_filter_source": filter_source,
-    }
-
-
 def build_persona_prompt(brief: dict[str, Any], persona: dict[str, Any]) -> str:
     prompt_persona = normalize_persona_for_prompt(persona)
     return f"""
@@ -3615,7 +3219,7 @@ def build_persona_prompt(brief: dict[str, Any], persona: dict[str, Any]) -> str:
 - 이 persona의 생활 맥락, 직업, 목표를 근거로 판단한다.
 - 나이/성별/지역에 대한 고정관념만으로 판단하지 않는다.
 - 제품 이해도, 필요 적합도, 채택 가능성, 가격 저항, 거부 이유를 구체적으로 쓴다.
-- `understanding_score`, `need_fit_score`, `adoption_likelihood`는 반드시 0-100 정수 percentage로 쓴다.
+- `understanding_score`, `need_fit_score`, `adoption_likelihood`는 반드시 0-100 정수 평정 점수로 쓴다. 실제 구매 확률이나 모집단 비율을 뜻하지 않는다.
 - 점수는 변별력 있게 매긴다. 무난한 중간값으로 몰지 말고, persona-product fit이 낮으면 20-45도 적극 사용한다.
 - stance calibration:
   - adoption_likelihood >= 70: "긍정형"
@@ -3683,848 +3287,6 @@ def _price_risk_from_reactions(reactions: list[dict[str, Any]]) -> str:
     if avg < 2.4:
         return "Medium"
     return "High"
-
-
-def _markdown_escape(value: Any) -> str:
-    return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ").strip()
-
-
-def _markdown_bullets(items: list[Any], *, empty: str = "n/a", limit: int = 6) -> list[str]:
-    values = [str(item).strip() for item in items if str(item).strip()][:limit]
-    if not values:
-        values = [empty]
-    return [f"- {_markdown_escape(item)}" for item in values]
-
-
-def format_report_markdown(brief: dict[str, Any], aggregate: dict[str, Any]) -> str:
-    """Render a simulation result as a portable Markdown insight report.
-
-    The JSON response remains the canonical machine-readable artifact, but a
-    founder needs a paste-ready report for docs, Notion, GitHub issues, and
-    follow-up interview scripts. This formatter is deterministic and local so it
-    does not add another API call or leak secrets.
-    """
-
-    normalized = validate_brief(brief)
-    report = aggregate.get("report", {}) if isinstance(aggregate.get("report"), dict) else {}
-    brief_quality = aggregate.get("brief_quality") or report.get("brief_quality") or {}
-    evidence_quality = aggregate.get("evidence_quality") or report.get("evidence_quality") or {}
-    request_budget = aggregate.get("request_budget") or report.get("request_budget") or {}
-    panel_profile = aggregate.get("panel_profile") or report.get("panel_profile") or {}
-    founder_memo = aggregate.get("founder_memo") or report.get("founder_memo") or {}
-    research_type_lens = aggregate.get("research_type_lens") or report.get("research_type_lens") or {}
-    persona_evidence_pack = aggregate.get("persona_evidence_pack") or report.get("persona_evidence_pack") or {}
-    decision_board = report.get("decision_board") if isinstance(report.get("decision_board"), dict) else {}
-    switching_analysis = report.get("switching_analysis") if isinstance(report.get("switching_analysis"), dict) else {}
-    competitive_benchmark = report.get("competitive_benchmark") if isinstance(report.get("competitive_benchmark"), dict) else {}
-    pricing_sensitivity = report.get("pricing_sensitivity") if isinstance(report.get("pricing_sensitivity"), dict) else {}
-    assumption_stress_test = report.get("assumption_stress_test") if isinstance(report.get("assumption_stress_test"), dict) else {}
-    validation_plan = report.get("validation_plan") if isinstance(report.get("validation_plan"), dict) else {}
-    recruiting_screener = report.get("recruiting_screener") if isinstance(report.get("recruiting_screener"), dict) else {}
-    interview_discussion_guide = report.get("interview_discussion_guide") if isinstance(report.get("interview_discussion_guide"), dict) else {}
-    validation_survey = report.get("validation_survey") if isinstance(report.get("validation_survey"), dict) else {}
-    field_validation_tracker = report.get("field_validation_tracker") if isinstance(report.get("field_validation_tracker"), dict) else {}
-    message_angle_tests = report.get("message_angle_tests") if isinstance(report.get("message_angle_tests"), list) else []
-    experiment_backlog = report.get("experiment_backlog") if isinstance(report.get("experiment_backlog"), list) else []
-    next_run_brief_variants = report.get("next_run_brief_variants") if isinstance(report.get("next_run_brief_variants"), list) else []
-    research_sprint = report.get("research_sprint") if isinstance(report.get("research_sprint"), dict) else {}
-    intent_cohort_contrast = report.get("intent_cohort_contrast") if isinstance(report.get("intent_cohort_contrast"), dict) else {}
-    focus_group_simulation_plan = report.get("focus_group_simulation_plan") if isinstance(report.get("focus_group_simulation_plan"), dict) else {}
-    decision_sensitivity = report.get("decision_sensitivity") if isinstance(report.get("decision_sensitivity"), dict) else {}
-    objections = report.get("objections") if isinstance(report.get("objections"), list) else []
-    segments = report.get("segment_recommendations") if isinstance(report.get("segment_recommendations"), list) else []
-    reactions = aggregate.get("persona_reactions") if isinstance(aggregate.get("persona_reactions"), list) else []
-
-    lines = [
-        f"# Upkinsey Market Insight Report — {_markdown_escape(normalized['product_name'])}",
-        "",
-        "## Executive summary",
-        "",
-        "Scores are model-generated 0–100 ratings, not purchase probabilities or statistical confidence.",
-        "",
-        _markdown_escape(report.get("executive_summary") or "Synthetic market pre-research result."),
-        "",
-        "## Product brief",
-        "",
-        f"- Research type: {_markdown_escape(normalized['research_type'])}",
-        f"- Target market: {_markdown_escape(normalized['target_market'] or 'n/a')}",
-        f"- Current alternatives: {_markdown_escape(normalized['current_alternatives'] or 'n/a')}",
-        f"- Hypothesis: {_markdown_escape(normalized['hypothesis'] or 'n/a')}",
-        "",
-        "## Signal board",
-        "",
-        f"- Adoption likelihood: {aggregate.get('adoption_score', '-')}/100",
-        f"- Need fit: {aggregate.get('need_fit_score', '-')}/100",
-        f"- Price risk: {_markdown_escape(aggregate.get('price_risk', '-'))}",
-        f"- Brief quality: {brief_quality.get('score', '-')} / 100 ({_markdown_escape(brief_quality.get('verdict', '-'))})",
-        f"- Evidence quality: {evidence_quality.get('score', '-')} / 100 ({_markdown_escape(evidence_quality.get('level', '-'))}, {_markdown_escape(evidence_quality.get('confidence', '-'))} confidence)",
-        f"- Solar request budget: {request_budget.get('estimated_total_model_calls', '-')} model calls across {request_budget.get('planned_batches', '-')} batch(es)",
-        *(
-            [
-                f"- Persona panel: {_markdown_escape(panel_profile.get('selected_persona_count', '-'))} selected ({_markdown_escape(panel_profile.get('selection_mode', '-'))})"
-            ]
-            if panel_profile
-            else []
-        ),
-        "",
-    ]
-
-    if founder_memo:
-        snapshot = founder_memo.get("signal_snapshot") if isinstance(founder_memo.get("signal_snapshot"), dict) else {}
-        lines += [
-            "## Founder decision memo",
-            "",
-            f"- Headline: {_markdown_escape(founder_memo.get('headline', ''))}",
-            f"- Recommendation: {_markdown_escape(founder_memo.get('recommendation', ''))}",
-            f"- Why it may work: {_markdown_escape(founder_memo.get('why_it_may_work', ''))}",
-            f"- Primary kill-risk: {_markdown_escape(founder_memo.get('primary_kill_risk', ''))}",
-            f"- Decision gate: {_markdown_escape(founder_memo.get('decision_gate', ''))}",
-            f"- Positive / skeptical personas: {_markdown_escape(snapshot.get('positive_personas', '-'))} / {_markdown_escape(snapshot.get('skeptical_personas', '-'))}",
-            "- Next 48h actions:",
-            *_markdown_bullets(founder_memo.get("next_48h_actions", []), empty="n/a", limit=4),
-            f"- Caveat: {_markdown_escape(founder_memo.get('caveat', ''))}",
-            "",
-            f"> {_markdown_escape(founder_memo.get('copy_paste_summary', ''))}",
-            "",
-        ]
-
-    if research_type_lens:
-        lines += [
-            "## Research type lens",
-            "",
-            f"- Lens: {_markdown_escape(research_type_lens.get('lens', '-'))}",
-            f"- Primary metric: {_markdown_escape(research_type_lens.get('primary_metric', '-'))}",
-            f"- Primary output: {_markdown_escape(research_type_lens.get('primary_output', '-'))}",
-            f"- Interpretation: {_markdown_escape(research_type_lens.get('interpretation', '-'))}",
-            f"- Recommended next action: {_markdown_escape(research_type_lens.get('recommended_next_action', '-'))}",
-            f"- Watch metric: {_markdown_escape(research_type_lens.get('watch_metric', '-'))}",
-            "",
-        ]
-
-    if panel_profile:
-        lines += [
-            "## Persona panel coverage",
-            "",
-            f"- Selection mode: {_markdown_escape(panel_profile.get('selection_mode', 'unfiltered'))}",
-            f"- Source personas: {_markdown_escape(panel_profile.get('source_persona_count', '-'))}",
-            f"- Selected personas: {_markdown_escape(panel_profile.get('selected_persona_count', '-'))}",
-            f"- Age range: {_markdown_escape(panel_profile.get('age_range', 'n/a'))}",
-        ]
-        if panel_profile.get("top_provinces"):
-            province_summary = ", ".join(
-                f"{item.get('value')} {item.get('count')}명" for item in panel_profile.get("top_provinces", [])[:5]
-            )
-            lines.append(f"- Top provinces: {_markdown_escape(province_summary)}")
-        if panel_profile.get("top_occupations"):
-            occupation_summary = ", ".join(
-                f"{item.get('value')} {item.get('count')}명" for item in panel_profile.get("top_occupations", [])[:5]
-            )
-            lines.append(f"- Top occupations: {_markdown_escape(occupation_summary)}")
-        if panel_profile.get("age_buckets"):
-            age_summary = ", ".join(
-                f"{item.get('value')} {item.get('count')}명" for item in panel_profile.get("age_buckets", [])[:6]
-            )
-            lines.append(f"- Age buckets: {_markdown_escape(age_summary)}")
-        if panel_profile.get("warnings"):
-            lines += ["Warnings:", *_markdown_bullets(panel_profile.get("warnings", []), empty="n/a"), ""]
-        elif panel_profile.get("recommendations"):
-            lines += ["Recommendations:", *_markdown_bullets(panel_profile.get("recommendations", []), empty="n/a"), ""]
-        else:
-            lines.append("")
-
-    if request_budget:
-        lines += [
-            "## Run budget & bounds",
-            "",
-            f"- Mode: {_markdown_escape(request_budget.get('mode', 'bounded_parallel_persona_calls'))}",
-            f"- Requested sample size: {_markdown_escape(request_budget.get('requested_sample_size', '-'))}",
-            f"- Actual personas: {_markdown_escape(request_budget.get('actual_persona_count', '-'))}",
-            f"- Solar persona calls: {_markdown_escape(request_budget.get('solar_persona_calls', '-'))}",
-            f"- Local aggregation calls: {_markdown_escape(request_budget.get('local_aggregation_calls', 0))}",
-            f"- Max parallel requests: {_markdown_escape(request_budget.get('max_parallel_requests', '-'))}",
-            f"- Planned batches: {_markdown_escape(request_budget.get('planned_batches', '-'))}",
-        ]
-        if request_budget.get("warnings"):
-            lines += ["Warnings:", *_markdown_bullets(request_budget.get("warnings", []), empty="n/a"), ""]
-        elif request_budget.get("recommendations"):
-            lines += ["Recommendations:", *_markdown_bullets(request_budget.get("recommendations", []), empty="n/a"), ""]
-        else:
-            lines.append("")
-
-    if evidence_quality.get("warnings") or evidence_quality.get("recommended_actions"):
-        lines += ["## Evidence quality guardrail", ""]
-        lines += [
-            f"- Persona count: {evidence_quality.get('persona_count', '-')}",
-            f"- Adoption range: {_markdown_escape(evidence_quality.get('adoption_range', '-'))}",
-        ]
-        if evidence_quality.get("warnings"):
-            lines += ["Warnings:", *_markdown_bullets(evidence_quality.get("warnings", []), empty="n/a"), ""]
-        if evidence_quality.get("recommended_actions"):
-            lines += ["Recommended next actions:", *_markdown_bullets(evidence_quality.get("recommended_actions", []), empty="n/a"), ""]
-
-    if brief_quality.get("missing_fields") or brief_quality.get("recommended_questions"):
-        lines += ["## Brief preflight", ""]
-        if brief_quality.get("missing_fields"):
-            lines += ["Missing/tighten:", * _markdown_bullets(brief_quality.get("missing_fields", [])), ""]
-        if brief_quality.get("recommended_questions"):
-            lines += ["Recommended questions:", * _markdown_bullets(brief_quality.get("recommended_questions", [])), ""]
-
-    lines += [
-        "## What may work",
-        "",
-        *_markdown_bullets(report.get("positive_drivers", []), empty="생활 문제를 직접 해결하는 실용성"),
-        "",
-        "## What may block adoption",
-        "",
-        *_markdown_bullets(report.get("top_risks", []), empty="가격 저항과 신뢰 부족"),
-        "",
-    ]
-
-    if persona_evidence_pack:
-        lines += [
-            "## Persona evidence pack",
-            "",
-            _markdown_escape(persona_evidence_pack.get("summary", "")),
-            "",
-        ]
-        supporter_cards = persona_evidence_pack.get("supporter_cards") if isinstance(persona_evidence_pack.get("supporter_cards"), list) else []
-        barrier_cards = persona_evidence_pack.get("barrier_cards") if isinstance(persona_evidence_pack.get("barrier_cards"), list) else []
-        followup_cards = persona_evidence_pack.get("validation_followups") if isinstance(persona_evidence_pack.get("validation_followups"), list) else []
-        cards = [("Supporter", card) for card in supporter_cards[:3]] + [("Barrier", card) for card in barrier_cards[:3]]
-        if cards:
-            lines += ["| Type | Persona | Signal | Interview probe |", "|---|---|---|---|"]
-            for label, card in cards:
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(label),
-                            _markdown_escape(card.get("persona", "Persona")),
-                            _markdown_escape(card.get("signal", "")),
-                            _markdown_escape(card.get("interview_probe", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        if followup_cards:
-            lines += ["Validation follow-ups:"]
-            lines += _markdown_bullets([card.get("validation_question", "") for card in followup_cards], empty="n/a", limit=5)
-            lines.append("")
-        if persona_evidence_pack.get("disclaimer"):
-            lines += [f"_Note: {_markdown_escape(persona_evidence_pack.get('disclaimer', ''))}_", ""]
-
-    if objections:
-        lines += ["## Objection cards", "", "| Category | Example objection | Suggested fix | Affected |", "|---|---|---|---|"]
-        for objection in objections[:6]:
-            affected = ", ".join(str(item) for item in _listify(objection.get("affected_personas"))[:3])
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        _markdown_escape(objection.get("category", "기타")),
-                        _markdown_escape(objection.get("objection", "")),
-                        _markdown_escape(objection.get("suggested_fix", "")),
-                        _markdown_escape(affected or "n/a"),
-                    ]
-                )
-                + " |"
-            )
-        lines.append("")
-
-    if switching_analysis:
-        lines += [
-            "## Current alternative & switching triggers",
-            "",
-            f"- Current alternative: {_markdown_escape(switching_analysis.get('current_alternatives', 'n/a'))}",
-            "- Why the current alternative persists:",
-            *_markdown_bullets(switching_analysis.get("why_current_alternative_persists", []), empty="n/a", limit=5),
-            "- Switching triggers:",
-            *_markdown_bullets(switching_analysis.get("switching_triggers", []), empty="n/a", limit=5),
-            "- Validation tests:",
-            *_markdown_bullets(switching_analysis.get("validation_tests", []), empty="n/a", limit=5),
-            "",
-        ]
-
-    if competitive_benchmark:
-        lines += [
-            "## Competitive benchmark matrix",
-            "",
-            _markdown_escape(competitive_benchmark.get("summary", "")),
-            "",
-            f"- Primary barrier: {_markdown_escape(competitive_benchmark.get('primary_barrier', 'n/a'))}",
-            f"- Positioning fix: {_markdown_escape(competitive_benchmark.get('suggested_positioning_fix', 'n/a'))}",
-            f"- Next probe: {_markdown_escape(competitive_benchmark.get('recommended_next_probe', 'n/a'))}",
-            "",
-        ]
-        benchmarks = competitive_benchmark.get("benchmarks") if isinstance(competitive_benchmark.get("benchmarks"), list) else []
-        if benchmarks:
-            lines += ["| Current alternative | Why users stay | Advantage to test | Barrier | Probe |", "|---|---|---|---|---|"]
-            for row in benchmarks[:5]:
-                if not isinstance(row, dict):
-                    continue
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(row.get("alternative", "")),
-                            _markdown_escape(row.get("why_users_stay", "")),
-                            _markdown_escape(row.get("product_advantage_to_test", "")),
-                            _markdown_escape(row.get("unresolved_barrier", "")),
-                            _markdown_escape(row.get("validation_probe", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-
-    if pricing_sensitivity:
-        lines += [
-            "## Pricing sensitivity lab",
-            "",
-            f"- Overall price risk: {_markdown_escape(pricing_sensitivity.get('overall_price_risk', 'n/a'))}",
-            f"- Price-sensitive personas: {_markdown_escape(pricing_sensitivity.get('price_sensitive_persona_count', 0))}",
-            f"- Top price objection: {_markdown_escape(pricing_sensitivity.get('top_price_objection', 'n/a'))}",
-            f"- Recommended probe: {_markdown_escape(pricing_sensitivity.get('recommended_price_probe', 'n/a'))}",
-            "",
-        ]
-        options = pricing_sensitivity.get("options") if isinstance(pricing_sensitivity.get("options"), list) else []
-        if options:
-            lines += ["| Price option | Role | Friction-adjusted adoption | Probe |", "|---|---|---:|---|"]
-            for option in options[:6]:
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(option.get("option", "")),
-                            _markdown_escape(option.get("test_role", "")),
-                            _markdown_escape(f"{option.get('estimated_adoption_after_friction', '-')}/100"),
-                            _markdown_escape(option.get("recommended_probe", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        if pricing_sensitivity.get("validation_questions"):
-            lines += [
-                "Pricing validation questions:",
-                *_markdown_bullets(pricing_sensitivity.get("validation_questions", []), empty="n/a", limit=5),
-                "",
-            ]
-
-    if assumption_stress_test:
-        lines += [
-            "## Assumption stress test",
-            "",
-            f"- Overall assumption risk: {_markdown_escape(assumption_stress_test.get('overall_risk', 'n/a'))}",
-            f"- Recommended next step: {_markdown_escape(assumption_stress_test.get('recommended_next_step', 'n/a'))}",
-            "",
-        ]
-        assumptions = assumption_stress_test.get("assumptions") if isinstance(assumption_stress_test.get("assumptions"), list) else []
-        if assumptions:
-            lines += ["| Risk | Assumption | Synthetic signal | Falsification test | Pass signal |", "|---|---|---|---|---|"]
-            for card in assumptions[:6]:
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(card.get("risk_level", "")),
-                            _markdown_escape(card.get("assumption", "")),
-                            _markdown_escape(card.get("synthetic_signal", "")),
-                            _markdown_escape(card.get("falsification_test", "")),
-                            _markdown_escape(card.get("pass_signal", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        if assumption_stress_test.get("watchouts"):
-            lines += ["Watchouts:", *_markdown_bullets(assumption_stress_test.get("watchouts", []), empty="n/a", limit=5), ""]
-
-    if segments:
-        lines += ["## Segment recommendations", "", "| Segment | Personas | Avg adoption | Primary objection | Next validation action |", "|---|---:|---:|---|---|"]
-        for segment in segments[:5]:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        _markdown_escape(segment.get("segment", "검증 타깃")),
-                        _markdown_escape(segment.get("persona_count", 0)),
-                        _markdown_escape(f"{segment.get('avg_adoption', '-')}/100"),
-                        _markdown_escape(segment.get("primary_objection", "")),
-                        _markdown_escape(segment.get("validation_action", "")),
-                    ]
-                )
-                + " |"
-            )
-        lines.append("")
-
-    if intent_cohort_contrast:
-        lines += [
-            "## Intent cohort contrast",
-            "",
-            _markdown_escape(intent_cohort_contrast.get("summary", "")),
-            "",
-            f"- Adoption gap: {_markdown_escape(intent_cohort_contrast.get('adoption_gap', 0))} points",
-            f"- Recommended comparison: {_markdown_escape(intent_cohort_contrast.get('recommended_comparison', ''))}",
-            "",
-        ]
-        cohorts = intent_cohort_contrast.get("cohorts") if isinstance(intent_cohort_contrast.get("cohorts"), list) else []
-        if cohorts:
-            lines += [
-                "| Cohort | Personas | Avg adoption | Drivers | Objections | Validation focus |",
-                "|---|---:|---:|---|---|---|",
-            ]
-            for cohort in cohorts[:5]:
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(cohort.get("label", cohort.get("cohort", "cohort"))),
-                            _markdown_escape(cohort.get("persona_count", 0)),
-                            _markdown_escape(f"{cohort.get('avg_adoption', '-')}/100"),
-                            _markdown_escape(", ".join(_listify(cohort.get("shared_drivers"))[:3]) or "n/a"),
-                            _markdown_escape(", ".join(_listify(cohort.get("shared_objections"))[:3]) or "n/a"),
-                            _markdown_escape(cohort.get("validation_focus", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-
-    if focus_group_simulation_plan:
-        lines += [
-            "## Focus group simulation plan",
-            "",
-            f"- Objective: {_markdown_escape(focus_group_simulation_plan.get('objective', ''))}",
-            f"- Recommended group size: {_markdown_escape(focus_group_simulation_plan.get('recommended_group_size', ''))}",
-            "",
-        ]
-        participant_mix = focus_group_simulation_plan.get("participant_mix") if isinstance(focus_group_simulation_plan.get("participant_mix"), list) else []
-        if participant_mix:
-            lines += ["| Role | Personas | Avg adoption | Objections |", "|---|---|---:|---|"]
-            for participant in participant_mix[:5]:
-                if not isinstance(participant, dict):
-                    continue
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(participant.get("label", participant.get("role", ""))),
-                            _markdown_escape(", ".join(_listify(participant.get("personas"))) or "n/a"),
-                            _markdown_escape(f"{participant.get('avg_adoption', '-')}/100"),
-                            _markdown_escape(", ".join(_listify(participant.get("common_objections"))[:3]) or "n/a"),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        protocol = focus_group_simulation_plan.get("discussion_protocol") if isinstance(focus_group_simulation_plan.get("discussion_protocol"), list) else []
-        if protocol:
-            lines += ["Protocol:", "", "| Stage | Timebox | Moderator prompt | Capture |", "|---|---:|---|---|"]
-            for stage in protocol[:6]:
-                if not isinstance(stage, dict):
-                    continue
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(stage.get("stage", "")),
-                            _markdown_escape(f"{stage.get('timebox_minutes', '-')} min"),
-                            _markdown_escape(stage.get("moderator_prompt", "")),
-                            _markdown_escape(stage.get("capture", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        if focus_group_simulation_plan.get("contrast_questions"):
-            lines += [
-                "Contrast questions:",
-                *_markdown_bullets(focus_group_simulation_plan.get("contrast_questions", []), empty="n/a", limit=5),
-                "",
-            ]
-        if focus_group_simulation_plan.get("interaction_rules"):
-            lines += [
-                "Interaction rules:",
-                *_markdown_bullets(focus_group_simulation_plan.get("interaction_rules", []), empty="n/a", limit=5),
-                "",
-            ]
-        if focus_group_simulation_plan.get("caution"):
-            lines += [f"_Caution: {_markdown_escape(focus_group_simulation_plan.get('caution', ''))}_", ""]
-
-    if decision_board:
-        lines += [
-            "## Decision board",
-            "",
-            f"- Decision: **{_markdown_escape(decision_board.get('decision', 'Refine'))}** ({_markdown_escape(decision_board.get('confidence', 'low'))} confidence)",
-            f"- Rationale: {_markdown_escape(decision_board.get('rationale', ''))}",
-            f"- Next step: {_markdown_escape(decision_board.get('next_step', ''))}",
-            "- Criteria:",
-            *_markdown_bullets(decision_board.get("criteria", []), empty="n/a", limit=10),
-            "",
-        ]
-
-    if decision_sensitivity:
-        adoption_band = decision_sensitivity.get("adoption_band") if isinstance(decision_sensitivity.get("adoption_band"), dict) else {}
-        need_fit_band = decision_sensitivity.get("need_fit_band") if isinstance(decision_sensitivity.get("need_fit_band"), dict) else {}
-        lines += [
-            "## Decision sensitivity guardrail",
-            "",
-            f"- Risk level: {_markdown_escape(decision_sensitivity.get('risk_level', 'n/a'))}",
-            f"- Decision boundary: {_markdown_escape(decision_sensitivity.get('decision_boundary', 'n/a'))}",
-            f"- Adoption band: {_markdown_escape(adoption_band.get('range', 'n/a'))} (mean {adoption_band.get('mean', '-')}, ±{adoption_band.get('margin', '-')})",
-            f"- Need-fit band: {_markdown_escape(need_fit_band.get('range', 'n/a'))} (mean {need_fit_band.get('mean', '-')}, ±{need_fit_band.get('margin', '-')})",
-            f"- Interpretation: {_markdown_escape(decision_sensitivity.get('interpretation', ''))}",
-            f"- Recommended action: {_markdown_escape(decision_sensitivity.get('recommended_action', ''))}",
-            f"_Note: {_markdown_escape(decision_sensitivity.get('disclaimer', ''))}_",
-            "",
-        ]
-
-    if validation_plan:
-        lines += [
-            "## Real-user validation plan",
-            "",
-            f"- Objective: {_markdown_escape(validation_plan.get('objective', ''))}",
-            f"- Recommended sample: {_markdown_escape(validation_plan.get('recommended_sample', ''))}",
-            f"- Recruiting focus: {_markdown_escape(validation_plan.get('recruiting_focus', ''))}",
-            "- Interview questions:",
-            *_markdown_bullets(validation_plan.get("interview_questions", []), empty="n/a", limit=8),
-            "- Success criteria:",
-            *_markdown_bullets(validation_plan.get("success_criteria", []), empty="n/a", limit=6),
-            "",
-        ]
-
-    if recruiting_screener:
-        lines += [
-            "## Recruiting screener pack",
-            "",
-            f"- Objective: {_markdown_escape(recruiting_screener.get('objective', ''))}",
-            f"- Target profile: {_markdown_escape(recruiting_screener.get('target_profile', ''))}",
-            f"- Recommended completes: {_markdown_escape(recruiting_screener.get('recommended_completes', ''))}",
-            "- Must-have criteria:",
-            *_markdown_bullets(recruiting_screener.get("must_have_criteria", []), empty="n/a", limit=5),
-            "- Disqualifiers:",
-            *_markdown_bullets(recruiting_screener.get("disqualifiers", []), empty="n/a", limit=5),
-            "",
-        ]
-        screener_questions = (
-            recruiting_screener.get("screener_questions") if isinstance(recruiting_screener.get("screener_questions"), list) else []
-        )
-        if screener_questions:
-            lines += ["| Question | Accept if | Reject if |", "|---|---|---|"]
-            for card in screener_questions[:6]:
-                if not isinstance(card, dict):
-                    continue
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(card.get("question", "")),
-                            _markdown_escape(card.get("accept_if", "")),
-                            _markdown_escape(card.get("reject_if", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        quota_cells = recruiting_screener.get("quota_cells") if isinstance(recruiting_screener.get("quota_cells"), list) else []
-        if quota_cells:
-            lines += ["Quota cells:", "", "| Cell | Target | Minimum | Reason |", "|---|---|---:|---|"]
-            for cell in quota_cells[:5]:
-                if not isinstance(cell, dict):
-                    continue
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(cell.get("cell", "")),
-                            _markdown_escape(cell.get("target", "")),
-                            _markdown_escape(cell.get("minimum", "")),
-                            _markdown_escape(cell.get("reason", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        if recruiting_screener.get("incentive_note"):
-            lines += [f"- Incentive note: {_markdown_escape(recruiting_screener.get('incentive_note', ''))}", ""]
-
-    if interview_discussion_guide:
-        lines += [
-            "## Interview discussion guide",
-            "",
-            f"- Objective: {_markdown_escape(interview_discussion_guide.get('objective', ''))}",
-            f"- Session length: {_markdown_escape(interview_discussion_guide.get('session_length', '25-30 minutes'))}",
-            f"- Participant profile: {_markdown_escape(interview_discussion_guide.get('participant_profile', ''))}",
-            f"- Moderator intro: {_markdown_escape(interview_discussion_guide.get('moderator_intro', ''))}",
-            f"- Concept read: {_markdown_escape(interview_discussion_guide.get('concept_read', ''))}",
-            "",
-        ]
-        if interview_discussion_guide.get("warmup_questions"):
-            lines += ["Warm-up questions:", *_markdown_bullets(interview_discussion_guide.get("warmup_questions", []), empty="n/a", limit=5), ""]
-        tasks = interview_discussion_guide.get("concept_reaction_tasks") if isinstance(interview_discussion_guide.get("concept_reaction_tasks"), list) else []
-        if tasks:
-            lines += ["| Step | Question | Listen for |", "|---|---|---|"]
-            for task in tasks[:6]:
-                if not isinstance(task, dict):
-                    continue
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(task.get("step", "")),
-                            _markdown_escape(task.get("question", "")),
-                            _markdown_escape(task.get("what_to_listen_for", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        probes = interview_discussion_guide.get("objection_probes") if isinstance(interview_discussion_guide.get("objection_probes"), list) else []
-        if probes:
-            lines += ["Objection probes:"]
-            lines += _markdown_bullets(
-                [f"{probe.get('objection', '우려')}: {probe.get('probe', '')}" for probe in probes if isinstance(probe, dict)],
-                empty="n/a",
-                limit=5,
-            )
-            lines.append("")
-        if interview_discussion_guide.get("pricing_probe"):
-            lines += [f"- Pricing probe: {_markdown_escape(interview_discussion_guide.get('pricing_probe', ''))}", ""]
-        if interview_discussion_guide.get("note_taking_rubric"):
-            lines += ["Note-taking rubric:", *_markdown_bullets(interview_discussion_guide.get("note_taking_rubric", []), empty="n/a", limit=7), ""]
-        if interview_discussion_guide.get("success_signals"):
-            lines += ["Success signals:", *_markdown_bullets(interview_discussion_guide.get("success_signals", []), empty="n/a", limit=5), ""]
-        if interview_discussion_guide.get("caution"):
-            lines += [f"_Caution: {_markdown_escape(interview_discussion_guide.get('caution', ''))}_", ""]
-
-    if validation_survey:
-        lines += [
-            "## Validation survey instrument",
-            "",
-            f"- Objective: {_markdown_escape(validation_survey.get('objective', ''))}",
-            f"- Estimated length: {_markdown_escape(validation_survey.get('estimated_length', '5-7 minutes'))}",
-            f"- Target profile: {_markdown_escape(validation_survey.get('target_profile', ''))}",
-            f"- Recommended completes: {_markdown_escape(validation_survey.get('recommended_completes', ''))}",
-            "- Primary metrics:",
-            *_markdown_bullets(validation_survey.get("primary_metrics", []), empty="n/a", limit=8),
-            "",
-        ]
-        randomization = validation_survey.get("randomization_plan") if isinstance(validation_survey.get("randomization_plan"), dict) else {}
-        if randomization:
-            lines += [
-                f"- Randomization: {_markdown_escape(randomization.get('instruction', ''))}",
-                f"- Arms: {_markdown_escape(', '.join(_listify(randomization.get('arms'))) or 'n/a')}",
-                "",
-            ]
-        blocks = validation_survey.get("question_blocks") if isinstance(validation_survey.get("question_blocks"), list) else []
-        if blocks:
-            lines += ["Survey blocks:", "", "| Block | Purpose | Example question |", "|---|---|---|"]
-            for block in blocks[:6]:
-                if not isinstance(block, dict):
-                    continue
-                questions = block.get("questions") if isinstance(block.get("questions"), list) else []
-                first_question = questions[0] if questions and isinstance(questions[0], dict) else {}
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(block.get("block", "")),
-                            _markdown_escape(block.get("purpose", "")),
-                            _markdown_escape(first_question.get("question", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        if validation_survey.get("pass_signals"):
-            lines += ["Pass signals:", *_markdown_bullets(validation_survey.get("pass_signals", []), empty="n/a", limit=6), ""]
-        if validation_survey.get("caution"):
-            lines += [f"_Caution: {_markdown_escape(validation_survey.get('caution', ''))}_", ""]
-
-    if field_validation_tracker:
-        lines += [
-            "## Field validation calibration tracker",
-            "",
-            f"- Objective: {_markdown_escape(field_validation_tracker.get('objective', ''))}",
-            f"- Recommended field sample: {_markdown_escape(field_validation_tracker.get('recommended_field_sample', ''))}",
-            f"- Baseline decision: {_markdown_escape(field_validation_tracker.get('baseline_decision', ''))}",
-            f"- Evidence level: {_markdown_escape(field_validation_tracker.get('evidence_level', ''))}",
-            "",
-        ]
-        baseline = field_validation_tracker.get("synthetic_baseline") if isinstance(field_validation_tracker.get("synthetic_baseline"), dict) else {}
-        if baseline:
-            lines += [
-                "Synthetic baseline:",
-                f"- Personas: {_markdown_escape(baseline.get('persona_count', '-'))}",
-                f"- Adoption / need-fit: {_markdown_escape(baseline.get('adoption_score', '-'))}/100 / {_markdown_escape(baseline.get('need_fit_score', '-'))}/100",
-                f"- Positive-intent share: {_markdown_escape(baseline.get('positive_intent_share', '-'))}%",
-                f"- Top objections: {_markdown_escape(', '.join(_listify(baseline.get('top_objections'))[:5]) or 'n/a')}",
-                "",
-            ]
-        columns = field_validation_tracker.get("field_data_columns") if isinstance(field_validation_tracker.get("field_data_columns"), list) else []
-        if columns:
-            lines += ["Field data columns:", "", "| Column | Type | Description |", "|---|---|---|"]
-            for column in columns[:12]:
-                if not isinstance(column, dict):
-                    continue
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(column.get("column", "")),
-                            _markdown_escape(column.get("type", "")),
-                            _markdown_escape(column.get("description", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        metrics = field_validation_tracker.get("comparison_metrics") if isinstance(field_validation_tracker.get("comparison_metrics"), list) else []
-        if metrics:
-            lines += ["Comparison metrics:", "", "| Metric | Synthetic baseline | Field measure | Alert if |", "|---|---|---|---|"]
-            for metric in metrics[:8]:
-                if not isinstance(metric, dict):
-                    continue
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            _markdown_escape(metric.get("metric", "")),
-                            _markdown_escape(metric.get("synthetic_baseline", "")),
-                            _markdown_escape(metric.get("field_measure", "")),
-                            _markdown_escape(metric.get("alert_if", "")),
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
-        if field_validation_tracker.get("calibration_rules"):
-            lines += ["Calibration rules:", *_markdown_bullets(field_validation_tracker.get("calibration_rules", []), empty="n/a", limit=6), ""]
-        if field_validation_tracker.get("disclaimer"):
-            lines += [f"_Note: {_markdown_escape(field_validation_tracker.get('disclaimer', ''))}_", ""]
-
-    if message_angle_tests:
-        lines += ["## Message angle tests", "", "| Angle | Audience | Headline | Evidence to show | Pass signal |", "|---|---|---|---|---|"]
-        for angle in message_angle_tests[:5]:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        _markdown_escape(angle.get("label", "Message test")),
-                        _markdown_escape(angle.get("audience", "")),
-                        _markdown_escape(angle.get("headline", "")),
-                        _markdown_escape(angle.get("evidence_to_show", "")),
-                        _markdown_escape(angle.get("pass_signal", "")),
-                    ]
-                )
-                + " |"
-            )
-        lines.append("")
-
-    if experiment_backlog:
-        lines += [
-            "## Experiment backlog",
-            "",
-            "| Priority | Experiment | Hypothesis | Pass threshold |",
-            "|---|---|---|---|",
-        ]
-        for experiment in experiment_backlog[:5]:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        _markdown_escape(experiment.get("priority", "P1")),
-                        _markdown_escape(experiment.get("experiment", "Learning test")),
-                        _markdown_escape(experiment.get("hypothesis", "")),
-                        _markdown_escape(experiment.get("pass_threshold", "")),
-                    ]
-                )
-                + " |"
-            )
-        lines.append("")
-
-    if next_run_brief_variants:
-        lines += [
-            "## Next-run brief variants",
-            "",
-            "Use one of these bounded variants for the next Upkinsey simulation instead of rewriting the brief from scratch.",
-            "",
-        ]
-        for variant in next_run_brief_variants[:5]:
-            variant_brief = variant.get("brief") if isinstance(variant.get("brief"), dict) else {}
-            lines += [
-                f"### {_markdown_escape(variant.get('title', variant.get('variant', 'Next-run variant')))}",
-                f"- Why: {_markdown_escape(variant.get('why', ''))}",
-                f"- Validation focus: {_markdown_escape(variant.get('validation_focus', ''))}",
-                f"- Pass signal: {_markdown_escape(variant.get('pass_signal', ''))}",
-            ]
-            if variant.get("changes"):
-                lines += ["- Changes:", *_markdown_bullets(variant.get("changes", []), empty="n/a", limit=5)]
-            lines += [
-                "- Suggested brief:",
-                f"  - Research type: {_markdown_escape(variant_brief.get('research_type', ''))}",
-                f"  - Target: {_markdown_escape(variant_brief.get('target_market', ''))}",
-                f"  - Hypothesis: {_markdown_escape(variant_brief.get('hypothesis', ''))}",
-                f"  - Features: {_markdown_escape(', '.join(_listify(variant_brief.get('features'))[:6]) or 'n/a')}",
-                "",
-            ]
-
-    if research_sprint:
-        lines += [
-            "## Research sprint plan",
-            "",
-            f"- Sprint: {_markdown_escape(research_sprint.get('name', '5-day validation sprint'))}",
-            f"- Objective: {_markdown_escape(research_sprint.get('objective', ''))}",
-            f"- Recruiting focus: {_markdown_escape(research_sprint.get('recruiting_focus', ''))}",
-            f"- Primary experiment: {_markdown_escape(research_sprint.get('primary_experiment', ''))}",
-            f"- Decision gate: {_markdown_escape(research_sprint.get('decision_gate', ''))}",
-            "",
-            "| Day | Focus | Output | Tasks |",
-            "|---:|---|---|---|",
-        ]
-        for day in research_sprint.get("day_plan", [])[:7]:
-            task_text = "; ".join(str(task) for task in _listify(day.get("tasks"))[:4])
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        _markdown_escape(day.get("day", "")),
-                        _markdown_escape(day.get("focus", "")),
-                        _markdown_escape(day.get("output", "")),
-                        _markdown_escape(task_text),
-                    ]
-                )
-                + " |"
-            )
-        lines.append("")
-        if research_sprint.get("stop_conditions"):
-            lines += ["Stop conditions:", *_markdown_bullets(research_sprint.get("stop_conditions", []), empty="n/a", limit=5), ""]
-
-    if reactions:
-        lines += ["## Persona reaction table", "", "| Persona | Stance | Adoption | Need fit | Main concern |", "|---|---|---:|---:|---|"]
-        for reaction in reactions[:12]:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        _markdown_escape(_segment_persona_label(reaction)),
-                        _markdown_escape(reaction.get("stance", "")),
-                        _markdown_escape(f"{reaction.get('adoption_likelihood', '-')}/100"),
-                        _markdown_escape(f"{reaction.get('need_fit_score', '-')}/100"),
-                        _markdown_escape(reaction.get("concern", "")),
-                    ]
-                )
-                + " |"
-            )
-        lines.append("")
-
-    lines += [
-        "---",
-        "Synthetic pre-research signal only; validate with real users before product or investment decisions.",
-    ]
-    return "\n".join(lines).rstrip() + "\n"
 
 
 def aggregate_market_research(
@@ -4791,7 +3553,7 @@ def aggregate_market_research(
             "target_filter_match_count": panel_profile["target_filter_match_count"] if panel_profile else None,
             "aggregation": "local_deterministic",
         },
-        "model_note": "Upstage Solar Pro 3",
+        "model_note": "Local aggregation; source model not reported",
     }
     result["report_markdown"] = format_report_markdown(brief, result)
     result["report"]["markdown"] = result["report_markdown"]
@@ -4813,6 +3575,8 @@ def simulate_market_research(
     additional model call after the parallel batch.
     """
 
+    started_at = datetime.now(timezone.utc).isoformat()
+    started_clock = time.monotonic()
     normalized_brief = validate_brief(brief)
     if personas is not None and not personas:
         raise ValueError("personas must contain at least one persona")
@@ -4826,6 +3590,19 @@ def simulate_market_research(
         }
     source_personas = personas or SAMPLE_PERSONAS
     selected_personas = select_personas_for_brief(source_personas, normalized_brief)
+    model = getattr(getattr(client, "config", None), "model", None)
+    # Validate and fingerprint inputs before spending quota, not after successful
+    # model calls. External callers may provide non-JSON metadata on personas.
+    provenance = build_provenance(
+        brief=normalized_brief,
+        source_count=len(source_personas),
+        selected_personas=selected_personas,
+        model=model if isinstance(model, str) else None,
+        system_prompt=SYSTEM_PROMPT,
+        persona_prompts=[build_persona_prompt(normalized_brief, persona) for persona in selected_personas],
+        started_at=started_at,
+        duration_seconds=0,
+    )
     workers = max(1, min(max_workers, len(selected_personas), 8))
     if progress_callback:
         progress_callback(
@@ -4915,86 +3692,15 @@ def simulate_market_research(
         # Put incomplete-panel evidence first so it survives warning limits.
         evidence["warnings"] = unique_top([warning] + _listify(evidence.get("warnings")), limit=8)
         result.setdefault("report", {}).setdefault("evidence_quality", evidence)["warnings"] = evidence["warnings"]
-        result["report_markdown"] = format_report_markdown(normalized_brief, result)
-        result["report"]["markdown"] = result["report_markdown"]
+    provenance["duration_seconds"] = round(max(0, time.monotonic() - started_clock), 3)
+    result["model_note"] = provenance["model"] or "not reported by client"
+    result["provenance"] = provenance
+    result["report"]["provenance"] = provenance
+    result["request_budget"]["model"] = provenance["model"] or "not reported by client"
+    result["report"]["request_budget"]["model"] = result["request_budget"]["model"]
+    result["report_markdown"] = format_report_markdown(normalized_brief, result)
+    result["report"]["markdown"] = result["report_markdown"]
     return result
-
-
-def _normalize_chat_history(value: Any, *, limit: int = 10) -> list[dict[str, str]]:
-    if not isinstance(value, list):
-        return []
-    history: list[dict[str, str]] = []
-    for item in value[-limit:]:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "").strip()
-        content = str(item.get("content") or "").strip()
-        if role in {"user", "persona"} and content:
-            history.append({"role": role, "content": content[:800]})
-    return history
-
-
-def build_persona_chat_prompt(
-    brief: dict[str, Any],
-    persona_reaction: dict[str, Any],
-    user_message: str,
-    history: list[dict[str, str]] | None = None,
-) -> str:
-    """Build a grounded follow-up interview prompt for one persona."""
-
-    normalized_brief = validate_brief(brief)
-    safe_persona = {
-        "name": _first_text(persona_reaction.get("name"), "Persona"),
-        "meta": _shorten(persona_reaction.get("meta"), limit=300),
-        "stance": _shorten(persona_reaction.get("stance"), limit=80),
-        "understanding_score": _as_int(persona_reaction.get("understanding_score"), default=60),
-        "need_fit_score": _as_int(persona_reaction.get("need_fit_score"), default=60),
-        "adoption_likelihood": _as_int(persona_reaction.get("adoption_likelihood"), default=50),
-        "price_resistance": _shorten(persona_reaction.get("price_resistance"), limit=80),
-        "concern": _shorten(persona_reaction.get("concern"), limit=800),
-        "positive_drivers": _listify(persona_reaction.get("positive_drivers"))[:5],
-        "top_risks": _listify(persona_reaction.get("top_risks"))[:5],
-        "next_validation_question": _shorten(persona_reaction.get("next_validation_question"), limit=500),
-        "used_persona_fields": _listify(persona_reaction.get("used_persona_fields"))[:8],
-    }
-    return f"""
-너는 시장조사 시뮬레이션에서 아래 persona 본인처럼 답한다.
-과장된 롤플레이가 아니라, persona 결과와 제품 맥락에 근거해 짧고 현실적으로 답한다.
-
-[PRODUCT BRIEF]
-{json.dumps(normalized_brief, ensure_ascii=False, indent=2)}
-
-[PERSONA RESULT]
-{json.dumps(safe_persona, ensure_ascii=False, indent=2)}
-
-[RECENT CHAT]
-{json.dumps(_normalize_chat_history(history), ensure_ascii=False, indent=2)}
-
-[USER QUESTION]
-{user_message[:1200]}
-
-응답 규칙:
-- 반드시 1인칭으로 답한다.
-- persona 결과와 모순되지 않게 답한다.
-- 실제 인터뷰 참여자처럼 자연스럽게 답한다. 보고서 문체나 컨설턴트 문체를 쓰지 않는다.
-- 제품팀이 배울 수 있는 구체적 이유/조건을 포함하되, 근거 없는 수치/ROI/성과율은 만들지 않는다.
-- 최근 대화에서 이미 말한 내용을 반복하지 말고, 새 조건/증거/상황만 추가한다.
-- 질문이 이전 답변을 요약하거나 인용하더라도 그 문장을 따라 쓰지 않는다.
-- "판단합니다", "제시된다면", "납득 가능합니다"보다 "저라면", "그 정도면", "아직은" 같은 구어체를 쓴다.
-- 질문 하나에만 답한다. 인터뷰어가 묻지 않은 항목까지 보고서처럼 정리하지 않는다.
-- 가능하면 최근 경험/현재 방식/망설이는 순간/확인하고 싶은 증거 중 하나를 구체적으로 말한다.
-- 1~3문장 이내 한국어로 답한다.
-- JSON only.
-
-JSON schema:
-{{
-  "persona_name": "...",
-  "reply": "...",
-  "signal": "price | trust | usability | need | message | other",
-  "new_information": ["이번 답변에서 새로 나온 사실/조건"],
-  "suggested_followup": "..."
-}}
-""".strip()
 
 
 def chat_with_persona(
@@ -5027,473 +3733,6 @@ def chat_with_persona(
         "signal": str(data.get("signal") or "other"),
         "new_information": _listify(data.get("new_information"))[:5],
         "suggested_followup": str(data.get("suggested_followup") or "어떤 조건이면 사용 의향이 생기나요?"),
-    }
-
-
-def _analyst_information_coverage(messages: list[dict[str, str]]) -> dict[str, Any]:
-    """Heuristic stop check for iterative analyst interviews.
-
-    The analyst should keep asking until the transcript has practical learning,
-    not just a generic one-shot opinion. This local check avoids another model
-    call: it looks for reason, condition, evidence, and concrete next-action
-    language across persona replies.
-    """
-
-    replies = " ".join(
-        str(message.get("content") or "")
-        for message in messages
-        if message.get("role") == "persona"
-    )
-    lowered = replies.lower()
-    checks = {
-        "situation": _contains_any(lowered, ("최근", "지난", "때", "순간", "상황", "업무", "생활", "프로젝트", "수업", "강의", "현장")),
-        "current_alternative": _contains_any(lowered, ("지금", "현재", "기존", "대신", "직접", "수작업", "엑셀", "검색", "주변", "혼자", "따로")),
-        "reason": _contains_any(lowered, ("왜", "이유", "때문", "부담", "우려", "불안", "필요", "문제", "걸려", "망설")),
-        "condition": _contains_any(lowered, ("조건", "하면", "된다면", "있다면", "먼저", "경우", "전제", "필요", "정도면")),
-        "evidence": _contains_any(lowered, ("근거", "샘플", "체험", "무료", "데모", "후기", "검증", "보여", "공개", "확인", "예시", "시연")),
-        "price_condition": _contains_any(lowered, ("가격", "비용", "결제", "무료", "환불", "구독", "요금", "만원", "원")),
-        "action": _contains_any(lowered, ("사용", "결제", "가입", "신청", "전환", "써볼", "구매", "시도", "볼 것", "해볼")),
-    }
-    score = sum(1 for ok in checks.values() if ok)
-    persona_turns = sum(1 for message in messages if message.get("role") == "persona")
-    persona_replies = [
-        str(message.get("content") or "").strip()
-        for message in messages
-        if message.get("role") == "persona" and str(message.get("content") or "").strip()
-    ]
-    repeated = False
-    if len(persona_replies) >= 2:
-        prev, last = persona_replies[-2], persona_replies[-1]
-        repeated = _normalized_similarity(prev, last) >= 0.78 or _normalized_contains(prev, last)
-    enough = persona_turns >= 3 and score >= 5 and len(replies.strip()) >= 180
-    missing = [key for key, ok in checks.items() if not ok]
-    return {"checks": checks, "score": score, "enough": enough, "repeated": repeated, "missing": missing, "persona_turns": persona_turns}
-
-
-def _normalized_similarity(left: str, right: str) -> float:
-    def clean(value: str) -> str:
-        return re.sub(r"[^0-9A-Za-z가-힣]+", "", value or "").lower()
-
-    a = clean(left)
-    b = clean(right)
-    if not a or not b:
-        return 0.0
-    return SequenceMatcher(None, a, b).ratio()
-
-
-def _normalized_contains(left: str, right: str) -> bool:
-    def clean(value: str) -> str:
-        return re.sub(r"\s+", " ", value or "").strip()
-
-    a = clean(left)
-    b = clean(right)
-    if min(len(a), len(b)) < 40:
-        return False
-    short, long = (a, b) if len(a) <= len(b) else (b, a)
-    return short in long
-
-
-def _short_quote(text: Any, *, limit: int = 90) -> str:
-    value = re.sub(r"\s+", " ", str(text or "")).strip()
-    return value[: limit - 1].rstrip() + "…" if len(value) > limit else value
-
-
-def _probe(phase: str, question: str, goal: str) -> dict[str, str]:
-    return {"phase": phase, "question": question, "goal": goal}
-
-
-def _clean_interview_followup(text: Any) -> str:
-    """Return a display-safe interviewer question, or empty if it sounds like an internal prompt."""
-
-    question = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not question:
-        return ""
-    forbidden = (
-        "반복하지",
-        "새로운 조건",
-        "1~3문장",
-        "분석 목표",
-        "persona",
-        "페르소나",
-        "정확한 조건",
-        "ROI",
-        "성과율",
-        "보고서",
-        "JSON",
-    )
-    if any(term.lower() in question.lower() for term in forbidden):
-        return ""
-    if len(question) > 180:
-        return ""
-    if not question.endswith("?"):
-        question += "?"
-    return question
-
-
-def _asked_phases(messages: list[dict[str, str]], question_plan: dict[str, Any]) -> set[str]:
-    asked_questions = [
-        str(message.get("content") or "")
-        for message in messages
-        if message.get("role") == "analyst"
-    ]
-    phases: set[str] = set()
-    for probe in question_plan.get("probe_sequence") or []:
-        if not isinstance(probe, dict):
-            continue
-        question = str(probe.get("question") or "")
-        if any(_normalized_similarity(question, asked) >= 0.72 for asked in asked_questions):
-            phases.add(str(probe.get("phase") or ""))
-    return {phase for phase in phases if phase}
-
-
-def _select_probe_question(
-    question_plan: dict[str, Any],
-    messages: list[dict[str, str]],
-    missing: list[str],
-    *,
-    round_number: int,
-) -> str:
-    phase_by_missing = {
-        "situation": "past_behavior",
-        "current_alternative": "current_alternative",
-        "reason": "barrier",
-        "condition": "switching_condition",
-        "evidence": "proof",
-        "price_condition": "price_condition",
-        "action": "next_action",
-    }
-    probes = [probe for probe in (question_plan.get("probe_sequence") or []) if isinstance(probe, dict)]
-    asked = _asked_phases(messages, question_plan)
-    preferred_phases = [phase_by_missing[key] for key in missing if key in phase_by_missing]
-    preferred_phases += ["past_behavior", "current_alternative", "barrier", "proof", "price_condition", "next_action", "wrap"]
-    for phase in preferred_phases:
-        if phase in asked:
-            continue
-        for probe in probes:
-            if probe.get("phase") == phase:
-                question = _clean_interview_followup(probe.get("question"))
-                if question:
-                    return question
-
-    # Deterministic fallback for longer interviews: pick the next unasked natural probe.
-    for probe in probes[round_number - 1 :] + probes:
-        phase = str(probe.get("phase") or "")
-        if phase in asked:
-            continue
-        question = _clean_interview_followup(probe.get("question"))
-        if question:
-            return question
-    return "마지막으로, 이 제품에서 꼭 바뀌었으면 하는 걸 하나만 말해 주세요?"
-
-
-def build_analyst_question_plan(
-    brief: dict[str, Any],
-    persona_reaction: dict[str, Any],
-    research_question: str,
-    target: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Translate the user's research question into persona-facing probes.
-
-    The user question is the analyst's objective, not a script to paste into the
-    persona chat. This planner turns it into a primary interview question and a
-    small follow-up bank tailored to the persona's current stance/risks.
-    """
-
-    normalized = validate_brief(brief)
-    question_lower = research_question.lower()
-    matched_signals = [
-        signal
-        for signal, keywords in _question_signal_keywords(research_question).items()
-        if any(keyword.lower() in question_lower for keyword in keywords)
-    ]
-    if not matched_signals:
-        matched_signals = ["need"]
-
-    persona_name = _first_text(persona_reaction.get("name"), (target or {}).get("name"), "이 persona")
-    stance = _first_text(persona_reaction.get("stance"), "관망형")
-    concern = _short_quote(_first_text(persona_reaction.get("concern"), *(_listify(persona_reaction.get("top_risks")) or [""])), limit=120)
-    driver = _short_quote(_first_text(*(_listify(persona_reaction.get("positive_drivers")) or [""])), limit=90)
-
-    objective_by_signal = {
-        "price": "지불 의향과 가격 저항이 생기는 정확한 조건을 분리",
-        "trust": "신뢰를 만들거나 깨는 근거와 proof requirement를 파악",
-        "usability": "첫 사용/전환 과정에서 막히는 사용성 장벽을 확인",
-        "need": "문제 강도와 현재 대체 행동 대비 실제 필요성을 확인",
-        "message": "어떤 설명/표현이 설득 또는 거부감을 만드는지 확인",
-        "other": "의사결정에 필요한 구체적 이유와 다음 행동 조건을 확인",
-    }
-    objective = " / ".join(objective_by_signal.get(signal, objective_by_signal["other"]) for signal in matched_signals[:3])
-
-    if "price" in matched_signals and "trust" in matched_signals:
-        primary = (
-            "처음 봤을 때 가격이 더 걸리나요, 아니면 믿어도 되는지에 대한 불안이 더 큰가요? "
-            "왜 그렇게 느끼는지도 편하게 말해 주세요."
-        )
-    elif "price" in matched_signals:
-        primary = (
-            "가격이나 결제 조건을 봤을 때 제일 걸리는 부분이 뭐예요? "
-            "결제 전에 뭘 확인하면 마음이 좀 놓일까요?"
-        )
-    elif "trust" in matched_signals:
-        primary = (
-            "이걸 믿고 써보려면 먼저 뭐가 보여야 할까요? "
-            "반대로 아직 찝찝한 지점도 같이 말해 주세요."
-        )
-    elif "usability" in matched_signals:
-        primary = (
-            "처음 써본다고 생각하면 어디서 귀찮거나 어렵게 느껴질 것 같아요? "
-            "반대로 어떤 흐름이면 한번 해볼 만하다고 느낄까요?"
-        )
-    elif "message" in matched_signals:
-        primary = (
-            "설명을 들었을 때 어떤 부분은 믿음이 가고, 어떤 부분은 과장처럼 느껴져요? "
-            "어떻게 말하면 더 자연스러울지도 알려주세요."
-        )
-    else:
-        primary = (
-            "이걸 실제로 써볼지 말지 정할 때 제일 먼저 보는 기준이 뭐예요? "
-            "지금 하던 방식에서 바꾸려면 어떤 조건이 필요할까요?"
-        )
-
-    if persona_name:
-        primary = f"{persona_name}님, {primary}"
-
-    probes = [
-        _probe("opening", primary, "첫 반응과 가장 큰 장벽 확인"),
-        _probe("past_behavior", "비슷한 일이 최근에 있었나요? 그때는 어떻게 해결했어요?", "과거 행동과 실제 맥락 확인"),
-        _probe("current_alternative", "지금은 이 문제를 보통 어떻게 해결하고 계세요?", "현재 대체 행동 확인"),
-        _probe("barrier", "그중에서 제일 걸리는 걸 하나만 고르면 뭐예요?", "핵심 장벽 좁히기"),
-        _probe("proof", "그 불안을 줄이려면 화면이나 설명에서 뭘 먼저 보여주면 좋을까요?", "필요한 신뢰 증거 확인"),
-        _probe("switching_condition", "그 정도가 확인되면 지금 하던 방식에서 바꿔볼 마음이 생길까요?", "전환 조건 확인"),
-        _probe("next_action", "그게 확인되면 다음에는 뭘 해볼 것 같아요? 가격을 더 보거나, 데모를 보거나, 바로 써보거나요.", "다음 행동 확인"),
-        _probe("wrap", "마지막으로, 이 제품에서 꼭 바뀌었으면 하는 걸 하나만 말해 주세요.", "제품 개선 우선순위 확인"),
-    ]
-    if "message" in matched_signals:
-        probes.insert(4, _probe("message_reaction", "어떤 표현은 믿음이 가고, 어떤 표현은 좀 과장처럼 들리나요?", "메시지 반응 확인"))
-    if "price" in matched_signals:
-        probes.insert(5, _probe("price_condition", "가격이 괜찮다고 느끼려면 어떤 결제 방식이나 체험 조건이 필요할까요?", "지불 장벽 완화 조건 확인"))
-    if "trust" in matched_signals:
-        probes.insert(5, _probe("proof", "믿어도 되겠다고 느끼려면 후기, 샘플, 검증 자료 중 뭐가 제일 먼저 보여야 할까요?", "신뢰 형성 증거 확인"))
-
-    probe_sequence: list[dict[str, str]] = []
-    seen_phases: set[str] = set()
-    for probe in probes:
-        phase = probe["phase"]
-        if phase == "proof" and phase in seen_phases:
-            continue
-        if phase not in seen_phases:
-            probe_sequence.append(probe)
-            seen_phases.add(phase)
-
-    return {
-        "research_question": research_question.strip(),
-        "objective": objective,
-        "signals": matched_signals,
-        "primary_question": primary[:1200],
-        "probe_sequence": probe_sequence[:8],
-        "followup_questions": [probe["question"] for probe in probe_sequence[1:6]],
-        "persona_context": {
-            "name": persona_name,
-            "stance": stance,
-            "concern": concern,
-            "driver": driver,
-            "target_reason": (target or {}).get("reason") or "분석 질문에 대한 대표 반응 확인",
-        },
-    }
-
-
-def build_custom_analyst_followup(
-    brief: dict[str, Any],
-    persona_reaction: dict[str, Any],
-    question_plan: dict[str, Any],
-    messages: list[dict[str, str]],
-    last_result: dict[str, Any],
-    *,
-    round_number: int,
-) -> str:
-    """Create the next tailored analyst question for a persona transcript."""
-
-    coverage = _analyst_information_coverage(messages)
-    missing = coverage.get("missing") or []
-    persona_name = _first_text(persona_reaction.get("name"), last_result.get("persona_name"), "이 persona")
-    suggested = _short_quote(last_result.get("suggested_followup"), limit=120)
-    focus = _select_probe_question(question_plan, messages, list(missing), round_number=round_number)
-    suggested_clean = _clean_interview_followup(suggested)
-    if suggested_clean and not any(_normalized_similarity(suggested_clean, str(message.get("content") or "")) >= 0.72 for message in messages if message.get("role") == "analyst"):
-        # Let the persona's own suggested angle win only when it is short and interview-like.
-        if round_number >= 4:
-            focus = suggested_clean
-
-    return f"{persona_name}님, {focus}"[:360]
-
-
-def _question_signal_keywords(question: str) -> dict[str, tuple[str, ...]]:
-    return {
-        "price": ("가격", "비용", "결제", "구독", "요금", "무료", "비싸", "수수료"),
-        "trust": ("신뢰", "믿", "정확", "근거", "검증", "보안", "개인정보", "데이터"),
-        "usability": ("사용", "설치", "복잡", "쉽", "온보딩", "귀찮", "불편"),
-        "need": ("필요", "문제", "니즈", "쓸", "왜", "대체", "현재", "습관"),
-        "message": ("문구", "메시지", "카피", "설명", "랜딩", "광고", "표현", "포지셔닝"),
-    }
-
-
-def _persona_question_match_score(reaction: dict[str, Any], question: str) -> int:
-    text = " ".join(
-        [
-            _first_text(reaction.get("stance")),
-            _first_text(reaction.get("concern")),
-            " ".join(_listify(reaction.get("positive_drivers"))),
-            " ".join(_listify(reaction.get("top_risks"))),
-            _first_text(reaction.get("next_validation_question")),
-            _first_text(reaction.get("meta")),
-        ]
-    ).lower()
-    question_lower = question.lower()
-    score = 0
-    for signal, keywords in _question_signal_keywords(question).items():
-        if any(keyword in question_lower for keyword in keywords):
-            score += 4 * sum(1 for keyword in keywords if keyword in text)
-            if signal == "price" and _price_risk_score(reaction.get("price_resistance")) >= 2:
-                score += 5
-            if signal in {"trust", "usability", "need", "message"} and any(keyword in text for keyword in keywords):
-                score += 3
-    return score
-
-
-def select_analyst_target_personas(
-    persona_reactions: list[dict[str, Any]],
-    question: str,
-    *,
-    limit: int = 4,
-) -> list[dict[str, Any]]:
-    """Choose a small interview panel before the analyst asks a question.
-
-    The analyst layer should not blindly ask every synthetic respondent. It first
-    assembles a compact target panel that covers likely supporters, conditional
-    adopters, and blockers, while boosting personas whose risks/drivers match the
-    question topic.
-    """
-
-    if not persona_reactions:
-        return []
-
-    limit = max(1, min(limit, len(persona_reactions), 8))
-    selected: list[dict[str, Any]] = []
-    selected_indices: set[int] = set()
-
-    def add(index: int, reason: str) -> None:
-        if index in selected_indices or len(selected) >= limit:
-            return
-        reaction = persona_reactions[index]
-        selected_indices.add(index)
-        selected.append(
-            {
-                "index": index,
-                "name": _first_text(reaction.get("name"), f"Persona {index + 1}"),
-                "meta": _first_text(reaction.get("meta")),
-                "stance": _first_text(reaction.get("stance"), "분석됨"),
-                "understanding_score": _as_int(reaction.get("understanding_score"), default=50),
-                "adoption_likelihood": _as_int(reaction.get("adoption_likelihood"), default=50),
-                "need_fit_score": _as_int(reaction.get("need_fit_score"), default=50),
-                "price_resistance": _first_text(reaction.get("price_resistance"), "Medium"),
-                "concern": _first_text(reaction.get("concern")),
-                "positive_drivers": _listify(reaction.get("positive_drivers"))[:5],
-                "top_risks": _listify(reaction.get("top_risks"))[:5],
-                "next_validation_question": _first_text(reaction.get("next_validation_question")),
-                "used_persona_fields": _listify(reaction.get("used_persona_fields"))[:8],
-                "persona_context": reaction.get("persona_context") if isinstance(reaction.get("persona_context"), dict) else None,
-                "reason": reason,
-            }
-        )
-
-    ranked_by_question = sorted(
-        range(len(persona_reactions)),
-        key=lambda idx: (
-            -_persona_question_match_score(persona_reactions[idx], question),
-            -_price_risk_score(persona_reactions[idx].get("price_resistance")),
-            _as_int(persona_reactions[idx].get("adoption_likelihood"), default=50),
-            _segment_persona_label(persona_reactions[idx]),
-        ),
-    )
-    if ranked_by_question and _persona_question_match_score(persona_reactions[ranked_by_question[0]], question) > 0:
-        add(ranked_by_question[0], "질문 주제와 가장 직접적으로 연결된 우려/동기가 있는 persona")
-
-    supporters = sorted(
-        range(len(persona_reactions)),
-        key=lambda idx: (-_as_int(persona_reactions[idx].get("adoption_likelihood"), default=0), _segment_persona_label(persona_reactions[idx])),
-    )
-    blockers = sorted(
-        range(len(persona_reactions)),
-        key=lambda idx: (_as_int(persona_reactions[idx].get("adoption_likelihood"), default=100), -_price_risk_score(persona_reactions[idx].get("price_resistance")), _segment_persona_label(persona_reactions[idx])),
-    )
-    conditionals = sorted(
-        [
-            idx
-            for idx, reaction in enumerate(persona_reactions)
-            if 50 <= _as_int(reaction.get("adoption_likelihood"), default=50) <= 69
-        ],
-        key=lambda idx: (-_price_risk_score(persona_reactions[idx].get("price_resistance")), _segment_persona_label(persona_reactions[idx])),
-    )
-
-    if supporters:
-        add(supporters[0], "초기 지지자의 구매/사용 조건 확인")
-    if conditionals:
-        add(conditionals[0], "조건부 전환자의 망설임과 전환 조건 확인")
-    if blockers:
-        add(blockers[0], "회의적인 persona의 비사용 이유 확인")
-
-    for idx in ranked_by_question:
-        add(idx, "질문 주제와 연결된 추가 대조군")
-        if len(selected) >= limit:
-            break
-    return selected
-
-
-def _synthesize_analyst_interviews(
-    question: str,
-    conversations: list[dict[str, Any]],
-) -> dict[str, Any]:
-    signal_labels = {
-        "price": "가격/지불 조건",
-        "trust": "신뢰/근거",
-        "usability": "사용성/진입 장벽",
-        "need": "필요성/문제 강도",
-        "message": "메시지/표현",
-        "other": "기타",
-    }
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for item in conversations:
-        signal = str(item.get("signal") or "other")
-        grouped.setdefault(signal, []).append(item)
-
-    opinion_groups = []
-    for signal, items in sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-        label = signal_labels.get(signal, signal)
-        personas = [str(item.get("persona_name") or item.get("name") or "Persona") for item in items]
-        evidence = [str(item.get("reply") or "").strip() for item in items if str(item.get("reply") or "").strip()]
-        first_evidence = evidence[0] if evidence else "추가 확인 필요"
-        opinion_groups.append(
-            {
-                "theme": label,
-                "personas": personas,
-                "opinion": f"{', '.join(personas)} 쪽에서는 {label} 관점의 의견이 있었다.",
-                "evidence": first_evidence,
-            }
-        )
-
-    summaries = [group["opinion"] for group in opinion_groups[:3]]
-    next_questions = unique_top(
-        [str(item.get("suggested_followup") or "") for item in conversations],
-        limit=4,
-    )
-    return {
-        "summary": " ".join(summaries) if summaries else f"'{question}'에 대해 아직 수합된 persona 의견이 없습니다.",
-        "opinion_groups": opinion_groups,
-        "recommendations": [
-            "보고서 확정 전, 반복 등장한 theme을 실제 인터뷰 probe나 랜딩 메시지 실험으로 옮긴다.",
-            "서로 반대되는 persona 의견은 평균 점수로 합치지 말고 조건/세그먼트 차이로 기록한다.",
-        ],
-        "next_questions": next_questions or ["이 의견이 실제 행동으로 이어지는 조건은 무엇인가요?"],
     }
 
 
@@ -5622,5 +3861,5 @@ def analyst_question_personas(
         "conversations": conversations,
         "synthesis": _synthesize_analyst_interviews(question.strip(), conversations),
         "max_rounds": max_rounds,
-        "model_note": "Upstage Solar Pro 3 persona interviews + local deterministic synthesis",
+        "model_note": f"{getattr(getattr(client, 'config', None), 'model', None) or 'not reported by client'} persona interviews + local deterministic synthesis",
     }

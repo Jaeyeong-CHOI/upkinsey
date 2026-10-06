@@ -1,6 +1,5 @@
 import base64
 import http.client
-import importlib.util
 import io
 import json
 import os
@@ -13,15 +12,11 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER_PATH = ROOT / "scripts" / "run_upkinsey_server.py"
 
 
 def load_server_module():
-    spec = importlib.util.spec_from_file_location("run_upkinsey_server", SERVER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    from upstage_api_sim import server
+    return server
 
 
 class FakeHandler:
@@ -48,6 +43,13 @@ class UpkinseyServerSafetyTests(unittest.TestCase):
         self.env_patch.stop()
         self.server.SIMULATION_JOBS.clear()
         self.server.RATE_LIMIT_STATE.clear()
+
+    def test_no_key_preview_never_downloads_a_persona_panel(self):
+        with patch.dict(os.environ, {"UPSTAGE_API_KEY": ""}), \
+             patch.object(self.server, "sample_persona_panel") as sample:
+            with self.assertRaisesRegex(RuntimeError, "UPSTAGE_API_KEY is not set"):
+                self.server.load_or_sample_personas({"sample_size": 100, "seed": 0})
+        sample.assert_not_called()
 
     def test_read_json_body_accepts_object(self):
         payload = {"product_name": "테스트"}
@@ -209,17 +211,23 @@ class UpkinseyServerHTTPTests(unittest.TestCase):
         cls.server = load_server_module()
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.root = Path(cls.temp_dir.name)
-        (cls.root / "prototype").mkdir()
-        (cls.root / "prototype" / "index.html").write_text("public index", encoding="utf-8")
-        (cls.root / "prototype" / ".env").write_text("private-dotfile", encoding="utf-8")
+        (cls.root / "frontend-dist").mkdir()
+        (cls.root / "frontend-dist" / "index.html").write_text("public index", encoding="utf-8")
+        (cls.root / "frontend-dist" / ".env").write_text("private-dotfile", encoding="utf-8")
         (cls.root / "private.txt").write_text("private-outside-root", encoding="utf-8")
-        (cls.root / "prototype" / "outside.txt").symlink_to(cls.root / "private.txt")
-        (cls.root / "prototype" / "listing").mkdir()
-        (cls.root / "prototype" / "listing" / "internal.txt").write_text("internal listing", encoding="utf-8")
-        (cls.root / "prototype" / "linked-index").mkdir()
-        (cls.root / "prototype" / "linked-index" / "index.html").symlink_to(cls.root / "private.txt")
+        (cls.root / "frontend-dist" / "outside.txt").symlink_to(cls.root / "private.txt")
+        (cls.root / "frontend-dist" / "listing").mkdir()
+        (cls.root / "frontend-dist" / "listing" / "internal.txt").write_text("internal listing", encoding="utf-8")
+        (cls.root / "frontend-dist" / "linked-index").mkdir()
+        (cls.root / "frontend-dist" / "linked-index" / "index.html").symlink_to(cls.root / "private.txt")
         cls.root_patch = patch.object(cls.server, "ROOT", cls.root)
         cls.root_patch.start()
+        cls.graph_patch = patch.object(cls.server, "GRAPH_STORE", cls.root / "graph" / "test.sqlite3")
+        cls.graph_patch.start()
+        cls.runs_patch = patch.object(cls.server, "RUN_STORE", cls.root / "runs")
+        cls.runs_patch.start()
+        (cls.root / "frontend-dist" / "assets").mkdir()
+        (cls.root / "frontend-dist" / "assets" / "app-ABCD1234.js").write_text("export {}", encoding="utf-8")
 
         class QuietHandler(cls.server.Handler):
             def log_message(self, *args):
@@ -234,6 +242,8 @@ class UpkinseyServerHTTPTests(unittest.TestCase):
         cls.httpd.shutdown()
         cls.thread.join(timeout=5)
         cls.httpd.server_close()
+        cls.runs_patch.stop()
+        cls.graph_patch.stop()
         cls.root_patch.stop()
         cls.temp_dir.cleanup()
 
@@ -274,6 +284,57 @@ class UpkinseyServerHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         self.assertEqual(body, b"")
+
+    def test_production_headers_cache_only_successful_fingerprinted_assets(self):
+        for method in ("GET", "HEAD"):
+            for path, cache in (("/", "no-cache"), ("/assets/app-ABCD1234.js", "public, max-age=31536000, immutable"), ("/api/health", "no-store")):
+                status, headers, _ = self.request(method, path)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Cache-Control"], cache)
+                self.assertIn("script-src 'self'", headers["Content-Security-Policy"])
+                self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+                self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        status, headers, _ = self.request("GET", "/assets/missing-ABCD1234.js")
+        self.assertEqual(status, 404)
+        self.assertNotIn("immutable", headers.get("Cache-Control", ""))
+
+    def test_graph_summary_requires_auth_but_health_does_not_expose_graph(self):
+        os.environ.update(UPKINSEY_REQUIRE_BASIC_AUTH="1", UPKINSEY_BASIC_AUTH_USER="operator",
+                          UPKINSEY_BASIC_AUTH_PASSWORD="example-password")
+        for method in ("GET", "HEAD"):
+            status, headers, _ = self.request(method, "/api/graph/summary")
+            self.assertEqual(status, 401)
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertEqual(self.request(method, "/assets/app-ABCD1234.js")[1]["Cache-Control"], "no-store")
+        auth = "Basic " + base64.b64encode(b"operator:example-password").decode()
+        status, headers, body = self.request("GET", "/api/graph/summary", headers={"Authorization": auth})
+        self.assertEqual(status, 200)
+        self.assertIsInstance(json.loads(body), dict)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        health = json.loads(self.request("GET", "/api/health")[2])
+        self.assertNotIn("graph", health)
+
+    def test_graph_failure_preserves_canonical_saved_run_and_hides_details(self):
+        with patch.object(self.server, "load_or_sample_personas", return_value=[{}]), \
+             patch.object(self.server, "simulate_market_research", return_value={"ok": True}), \
+             patch.object(self.server, "save_simulation_graph", side_effect=RuntimeError("private-path-and-secret")), \
+             self.assertLogs("upstage_api_sim.server", level="WARNING") as logs:
+            status, _, body = self.request("POST", "/api/simulate", b'{}')
+        self.assertEqual(status, 200)
+        response = json.loads(body)
+        self.assertEqual(response["graph"]["status"], "unavailable")
+        saved = self.server.load_simulation_run(self.server.RUN_STORE, response["version"]["version_id"])
+        self.assertTrue(saved["result"]["ok"])
+        self.assertNotIn("private-path-and-secret", body.decode() + " ".join(logs.output))
+        self.assertEqual(self.server._active_job_count(), 0)
+
+    def test_public_health_never_reads_the_research_archive(self):
+        with patch.object(self.server, "list_simulation_runs", side_effect=AssertionError("health must not scan runs")), \
+             patch.object(self.server, "graph_summary", side_effect=AssertionError("health must not read graph")):
+            status, _, body = self.request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertNotIn("runs", json.loads(body))
+        self.assertNotIn("graph", json.loads(body))
 
     def test_static_files_are_confined_and_not_listed(self):
         self.assertEqual(self.request("GET", "/")[2], b"public index")
@@ -329,7 +390,10 @@ class UpkinseyServerHTTPTests(unittest.TestCase):
                 with patch.object(self.server, "save_simulation_run", return_value={"summary": {"version_id": "test"}}):
                     status, _, body = self.request("POST", "/api/simulate", b"{}")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), {"ok": True, "version": {"version_id": "test"}})
+        response = json.loads(body)
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["version"], {"version_id": "test"})
+        self.assertEqual(response["graph"]["run_id"], "test")
         self.assertEqual(self.server._active_job_count(), 0)
 
     def test_cross_site_mutations_are_blocked_before_upstream_work(self):
@@ -374,7 +438,9 @@ class UpkinseyServerHTTPTests(unittest.TestCase):
         result = json.loads(body)
         self.assertEqual(status, 200)
         self.assertEqual(result["status"], "done")
-        self.assertEqual(result["result"], {"ok": True, "version": {"version_id": "saved"}})
+        self.assertTrue(result["result"]["ok"])
+        self.assertEqual(result["result"]["version"], {"version_id": "saved"})
+        self.assertEqual(result["result"]["graph"]["run_id"], "saved")
         self.assertEqual(self.server._active_job_count(), 0)
 
     def test_async_start_releases_slot_if_thread_cannot_start(self):

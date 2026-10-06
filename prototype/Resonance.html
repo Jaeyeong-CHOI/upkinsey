@@ -5,34 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>업킨지 앤 컴퍼니 — 출시 전 시장 반응 시뮬레이션</title>
 
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
 
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2308090d'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%238a7cff' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%238a7cff'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="styles.css?v=20261006-maintenance" />
 
-  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
-  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <!-- UPKINSEY_STYLES -->
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app"><p class="startup-message" role="status">화면을 불러오는 중입니다. 계속 보이면 페이지를 새로고침해주세요.</p></div>
+  <noscript><p class="startup-message">시뮬레이션 화면은 JavaScript가 필요합니다. 브라우저에서 JavaScript를 켜거나 <a href="index.html">제품 소개로 돌아가세요.</a></p></noscript>
 
-  <script src="research-ui.js?v=20261006-maintenance"></script>
-  <script src="data.js?v=20261006-maintenance"></script>
-  <script type="text/babel" src="tweaks-panel.jsx?v=20261006-maintenance"></script>
-  <script type="text/babel" src="persona-portrait.jsx?v=20261006-maintenance"></script>
-  <script type="text/babel" src="screens-brief-run.jsx?v=20261006-maintenance"></script>
-  <script type="text/babel" src="screens-signals.jsx?v=20261006-maintenance"></script>
-  <script type="text/babel" src="screens-personas.jsx?v=20261006-maintenance"></script>
-  <script type="text/babel" src="screens-report.jsx?v=20261006-maintenance"></script>
-  <script type="text/babel" src="screens-analyst.jsx?v=20261006-maintenance"></script>
-  <script type="text/babel" src="app.jsx?v=20261006-maintenance"></script>
 
-  <script type="text/babel">
-    const ResonanceApp = window.__RESONANCE_APP__;
-    const root = ReactDOM.createRoot(document.getElementById("app"));
-    root.render(<ResonanceApp />);
-  </script>
+  <!-- UPKINSEY_SCRIPT -->
 </body>
 </html>

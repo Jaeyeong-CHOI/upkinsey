@@ -1,5 +1,5 @@
+import React from "react";
 /* 리포트(Report) — 스토리 모드로 풀리는 인사이트 */
-/* global React, RESONANCE_DATA */
 
 const { useState: useStateR, useEffect: useEffectR, useRef: useRefR } = React;
 
@@ -241,4 +241,5 @@ function ReportScreen({ goBack, goRestart, result = null, data = null }) {
   );
 }
 
-window.ReportScreen = ReportScreen;
+
+export { ReportScreen };

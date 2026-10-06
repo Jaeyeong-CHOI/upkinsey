@@ -1,0 +1,20 @@
+{
+  "name": "upkinsey-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build_frontend.mjs",
+    "test": "node --test tests/frontend*.cjs"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

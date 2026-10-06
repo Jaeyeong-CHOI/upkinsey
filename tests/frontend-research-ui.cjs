@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
-const { test } = require('node:test');
+const { test, before } = require('node:test');
 const { getEventListeners } = require('node:events');
-const ui = require('../prototype/research-ui.js');
+let ui;
+before(async () => { ui = await import('../prototype/research-ui.js'); });
 
 test('zero is a valid reproducible sampling seed', () => {
   assert.equal(ui.toBackendBrief({}, { seed: 0 }).seed, 0);
@@ -89,4 +90,16 @@ test('poll delay respects both pending and already-aborted requests', async () =
   await assert.rejects(pending, { name: 'AbortError' });
   assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
   await assert.rejects(ui.sleep(60_000, controller.signal), { name: 'AbortError' });
+});
+
+
+test('chat Enter submits only after IME composition ends and preserves Shift+Enter', () => {
+  assert.equal(ui.shouldSubmitChatOnEnter({ key: 'Enter' }), true);
+  assert.equal(ui.shouldSubmitChatOnEnter({ key: 'Enter', shiftKey: true }), false);
+  assert.equal(ui.shouldSubmitChatOnEnter({ key: 'Escape' }), false);
+  assert.equal(ui.shouldSubmitChatOnEnter({ key: 'Enter', isComposing: true }), false);
+  assert.equal(ui.shouldSubmitChatOnEnter({ key: 'Enter', nativeEvent: { isComposing: true } }), false);
+  assert.equal(ui.shouldSubmitChatOnEnter({ key: 'Enter', keyCode: 229 }), false);
+  assert.equal(ui.shouldSubmitChatOnEnter({ key: 'Enter', nativeEvent: { isComposing: false, keyCode: 229 } }), false);
+  assert.equal(ui.shouldSubmitChatOnEnter({ key: 'Enter', nativeEvent: { isComposing: false, keyCode: 13 } }), true);
 });

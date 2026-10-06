@@ -1,5 +1,12 @@
+import React from "react";
+import { EXAMPLE_BRIEF } from "./data.js";
+import { BriefScreen, RunScreen } from "./screens-brief-run.jsx";
+import { SignalsScreen } from "./screens-signals.jsx";
+import { PersonasScreen } from "./screens-personas.jsx";
+import { AnalystScreen } from "./screens-analyst.jsx";
+import { ReportScreen } from "./screens-report.jsx";
+import { apiPath, toBackendBrief, briefFingerprint, sleep, mapResultToResonance, readApiResponse } from "./research-ui.js";
 /* 업킨지 앤 컴퍼니 — Drive zip UI wired to live backend */
-/* global React, RESONANCE_DATA, useTweaks, TweaksPanel, TweakSection, TweakRadio */
 
 const { useState, useEffect, useRef } = React;
 
@@ -12,10 +19,10 @@ const LAYERS = [
   { id: "report",   num: "6", name: "리포트",   sub: "다음 액션을 정해요" }
 ];
 
-const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+const APPEARANCE_DEFAULTS = {
   "theme": "dark",
   "personaMode": "constellation"
-}/*EDITMODE-END*/;
+};
 
 const SESSION_KEY = "upkinsey.resonance.session.v2";
 const SESSION_SCHEMA_VERSION = 3;
@@ -45,7 +52,6 @@ function clearSession() {
   try { window.localStorage.removeItem(SESSION_KEY); } catch (err) {}
 }
 
-const { asList, clamp, shortId, apiPath, priceKo, parseMeta, toBackendBrief, fromBackendBrief, canonicalBriefForHash, briefFingerprint, sleep, mapPersona, mapResultToResonance, readApiResponse, scoreLabel, personaBio } = window.UpkinseyUI;
 
 function NoResultScreen({ goRun, message = "먼저 제품 정보를 입력하고 시뮬레이션을 실행해주세요." }) {
   return (
@@ -64,7 +70,7 @@ function NoResultScreen({ goRun, message = "먼저 제품 정보를 입력하고
   );
 }
 
-function Nav({ current, setCurrent, savedTime, apiState, onReset }) {
+function Nav({ current, setCurrent, apiState, onReset, theme, onToggleTheme }) {
   return (
     <nav className="nav" data-screen-label="Nav">
       <div className="shell nav-inner">
@@ -86,6 +92,7 @@ function Nav({ current, setCurrent, savedTime, apiState, onReset }) {
           <div className="live-pill" role="status" aria-live="polite" title={apiState.detail || "실시간 API 상태"}>
             <div className="live-dot" data-status={apiState.status || "checking"} aria-hidden="true"></div><span>{apiState.label || "Live API"}</span><span className="ver">· 세션 자동 저장</span>
           </div>
+          <button type="button" className="reset-pill" onClick={onToggleTheme} aria-label={theme === "dark" ? "밝은 테마로 전환" : "어두운 테마로 전환"}>{theme === "dark" ? "밝게" : "어둡게"}</button>
           <button className="reset-pill" onClick={onReset} title="현재 브라우저에 저장된 세션을 지우고 새로 시작">새 세션</button>
         </div>
       </div>
@@ -98,7 +105,7 @@ function App() {
   const activeRunRef = useRef(null);
   const activeAbortRef = useRef(null);
   const analystProgressTimerRef = useRef(null);
-  const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const [appearance, setAppearance] = useState(APPEARANCE_DEFAULTS);
   const [current, setCurrent] = useState(() => {
     const params = new URLSearchParams(window.location.search);
     const start = params.get("start");
@@ -106,7 +113,7 @@ function App() {
     if (restoredSession.current && LAYERS.find(l => l.id === restoredSession.current)) return restoredSession.current;
     return "brief";
   });
-  const [brief, setBrief] = useState(() => restoredSession.brief || { ...RESONANCE_DATA.brief });
+  const [brief, setBrief] = useState(() => restoredSession.brief || { ...EXAMPLE_BRIEF });
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null);
   const [analystRunning, setAnalystRunning] = useState(false);
@@ -120,7 +127,7 @@ function App() {
   const currentBriefHash = briefFingerprint(brief);
   const resultStale = Boolean(result && result.__briefHash !== currentBriefHash);
   const liveResult = result && !resultStale ? result : null;
-  const liveData = liveResult ? mapResultToResonance(liveResult, brief) : RESONANCE_DATA;
+  const liveData = liveResult ? mapResultToResonance(liveResult, brief) : null;
   const personas = liveResult ? liveData.personas : [];
   const goTo = (id) => {
     if (RESULT_LAYERS.has(id) && !liveResult) {
@@ -151,7 +158,7 @@ function App() {
     analystProgressTimerRef.current = null;
     clearSession();
     setCurrent("brief");
-    setBrief({ ...RESONANCE_DATA.brief });
+    setBrief({ ...EXAMPLE_BRIEF });
     setResult(null);
     setAnalystResult(null);
     setParseStatus(null);
@@ -162,7 +169,7 @@ function App() {
     setError("");
   };
 
-  useEffect(() => { document.documentElement.dataset.theme = tweaks.theme; }, [tweaks.theme]);
+  useEffect(() => { document.documentElement.dataset.theme = appearance.theme; }, [appearance.theme]);
   useEffect(() => { window.scrollTo({ top: 0, behavior: "smooth" }); }, [current]);
   useEffect(() => { checkApiHealth(); return () => { cancelActiveRun(); if (analystProgressTimerRef.current) clearInterval(analystProgressTimerRef.current); }; }, []);
   useEffect(() => {
@@ -177,7 +184,7 @@ function App() {
       const response = await fetch(apiPath("/api/health"));
       const health = await readApiResponse(response);
       if (!health.ok) throw new Error("API key missing");
-      setApiState({ status: "ready", label: "Live API Ready", detail: `${health.model || "solar-pro3"} · ${health.runs ?? 0} saved runs` });
+      setApiState({ status: "ready", label: "API Configured", detail: `${health.model || "configured model"} · server key configured` });
     } catch (err) {
       setApiState({ status: "error", label: "API Not Ready", detail: String(err.message || err) });
     }
@@ -327,28 +334,21 @@ function App() {
 
   return (
     <>
-      <Nav current={current} setCurrent={goTo} savedTime={apiState.label} apiState={apiState} onReset={resetSession} />
+      <Nav current={current} setCurrent={goTo} apiState={apiState} onReset={resetSession} theme={appearance.theme} onToggleTheme={() => setAppearance(prev => ({ ...prev, theme: prev.theme === "dark" ? "light" : "dark" }))} />
       <main className="shell">
         {error && <div className="callout" style={{ marginTop: 24 }}><div className="callout-eyebrow">API 오류</div><div className="callout-text">{error}</div></div>}
         {resultStale && <div className="callout" style={{ marginTop: 24 }}><div className="callout-eyebrow">결과 숨김</div><div className="callout-text">제품 정보가 바뀌어 이전 시뮬레이션 결과를 표시하지 않습니다. 새로 실행해주세요.</div></div>}
         {current === "brief"    && <BriefScreen brief={brief} setBrief={updateBrief} goNext={() => goTo("run")} onParseDocument={parseDocumentBrief} parseStatus={parseStatus} />}
         {current === "run"      && <RunScreen brief={brief} onRun={runSimulation} goBack={() => goTo("brief")} running={running} progress={progress} />}
         {current === "signals"  && (liveResult ? <SignalsScreen data={liveData.signals} versions={liveData.versions} result={liveResult} goNext={() => goTo("personas")} goBack={() => goTo("run")} /> : <NoResultScreen goRun={() => goTo("run")} />)}
-        {current === "personas" && (liveResult ? <PersonasScreen personas={personas} mode={tweaks.personaMode} setMode={(m)=>setTweak("personaMode", m)} goNext={() => goTo("analyst")} goBack={() => goTo("signals")} onPersonaChat={personaChat} /> : <NoResultScreen goRun={() => goTo("run")} />)}
+        {current === "personas" && (liveResult ? <PersonasScreen personas={personas} mode={appearance.personaMode} setMode={(m)=>setAppearance(prev => ({ ...prev, personaMode: m }))} goNext={() => goTo("analyst")} goBack={() => goTo("signals")} onPersonaChat={personaChat} /> : <NoResultScreen goRun={() => goTo("run")} />)}
         {current === "analyst"  && (liveResult ? <AnalystScreen result={liveResult} analystResult={analystResult} onAsk={askAnalyst} goBack={() => goTo("personas")} goNext={() => goTo("report")} /> : <NoResultScreen goRun={() => goTo("run")} />)}
         {current === "report"   && (liveResult ? <ReportScreen result={liveResult} data={liveData} goBack={() => goTo("analyst")} goRestart={resetSession} /> : <NoResultScreen goRun={() => goTo("run")} />)}
       </main>
       <footer className="shell" style={{ padding: "24px 0", color: "var(--text-3)", fontSize: 12 }}>합성 응답은 실제 소비자 조사나 구매 확률이 아닙니다. · <a href="https://github.com/Jaeyeong-CHOI/upkinsey" target="_blank" rel="noopener noreferrer">GitHub · 기여하기</a></footer>
       {running && <SimulationOverlay progress={progress} title="시장에 제품을 던지고 있어요" defaultMessage="합성 응답자가 제품을 처음 듣고 있어요…" />}
       {analystRunning && <SimulationOverlay progress={analystProgress} title="분석가가 인터뷰를 진행하고 있어요" defaultMessage="응답자를 고르고 질문을 다시 설계하는 중…" />}
-      <TweaksPanel title="Tweaks">
-        <TweakSection label="화면 테마"><TweakRadio label="테마" value={tweaks.theme} options={[{ value: "dark", label: "어둡게" }, { value: "light", label: "밝게" }]} onChange={(v) => setTweak("theme", v)} /></TweakSection>
-        <TweakSection label="응답자 보는 방식">
-          <div className="tw-mode-swatches">
-            {[{ id: "constellation", label: "별자리" }, { id: "cards", label: "카드" }].map(s => <div key={s.id} className={"tw-swatch" + ((tweaks.personaMode === s.id || (!["constellation", "cards"].includes(tweaks.personaMode) && s.id === "constellation")) ? " active" : "")} onClick={() => setTweak("personaMode", s.id)}><span>{s.label}</span></div>)}
-          </div>
-        </TweakSection>
-      </TweaksPanel>
+
     </>
   );
 }
@@ -381,4 +381,4 @@ function SimulationOverlay({ progress, title = "시장에 제품을 던지고 �
   return <div className="sim-overlay"><div className="sim-stage"><canvas ref={canvasRef}></canvas><div className="sim-headline">{title}</div><div className="sim-thought">{thought}</div><div className="sim-progress"><div className="sim-progress-bar" style={{ width: percent + "%" }}></div></div></div></div>;
 }
 
-window.__RESONANCE_APP__ = App;
+export default App;

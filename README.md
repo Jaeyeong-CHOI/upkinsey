@@ -58,7 +58,9 @@ Upkinsey는 **제품팀이 실제 고객 인터뷰를 시작하기 전에 가설
 - **Pricing sensitivity lab** — willingness-to-pay probes and price-friction signals
 - **Validation pack** — screener, field interview guide, survey draft, and experiment backlog
 - **Founder memo** — concise decision memo for go / refine / pivot discussions
-- **Run history** — save, reload, and compare simulation versions
+- **Run history** — JSON 버전 저장·조회·비교 API와 현재 실행 요약
+- **Run provenance** — 실제 모델 식별자(알려진 경우), 패널·프롬프트 해시, 시드, 소스 revision, 실행 시간 기록
+- **Local graph projection** — 저장된 실행을 SQLite 관계·근거로 투영; JSON이 원본이며 그래프 실패가 저장을 취소하지 않음
 - **Self-hosting guardrails** — Basic Auth, rate limits, active job limits, and destructive API opt-in
 
 ## 프로젝트 상태와 한계
@@ -67,12 +69,12 @@ MIT 라이선스의 초기 beta 프로젝트이며, 외부 기여를 환영합�
 
 - 합성 응답은 고객 인터뷰나 대표성 있는 설문을 대체하지 않습니다. 점수와 persona 수를 실제 전환율·통계적 신뢰도로 해석하지 마세요. [연구 타당성 안내](docs/research-validity.md)를 참고하세요.
 - Python 표준 라이브러리 서버와 로컬 JSON 저장소를 사용합니다. 작업·요청 제한은 프로세스 단위이며 사용자별 데이터 격리는 없습니다.
-- 브라우저 UI는 React/Babel CDN과 외부 폰트를 사용하므로 기본 설정은 완전한 오프라인 앱이 아닙니다. Python 라이브러리 wheel에는 UI와 서버 스크립트가 포함되지 않습니다.
+- 브라우저 UI는 고정 버전 React와 esbuild로 사전 빌드합니다. 런타임 CDN·Babel·외부 폰트 요청이 없으며, Node.js 22 이상은 빌드·프런트엔드 테스트에만 필요합니다. Python wheel에는 서버/CLI가 포함되지만 빌드된 웹 자산은 별도로 준비해야 합니다.
 - 라이브 시뮬레이션에는 유료 Upstage API와 persona 데이터 접근이 필요합니다. 테스트는 키 없이 실행할 수 있습니다. Demo page의 가용성은 저장소 유지관리와 별개입니다.
 
 ## Quick start
 
-### 1. API 키 없이 설치·검증
+### 1. API 키 없이 설치·빌드·검증
 
 ```bash
 git clone https://github.com/Jaeyeong-CHOI/upkinsey.git
@@ -80,12 +82,23 @@ cd upkinsey
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
+npm ci
+npm run build
 PYTHONPATH=src python -m unittest discover -s tests -p 'test*.py' -v
+npm test
 ```
 
-핵심 런타임에는 외부 Python 의존성이 없습니다. `unittest`는 Python 기본 기능이며, 테스트에 API 키·PDF 업로드·데이터셋 다운로드가 필요하지 않습니다. 설치 과정은 패키지 저장소 접근이 필요할 수 있습니다. Windows와 프런트엔드 검증 방법은 [기여 안내](CONTRIBUTING.md)에 있습니다.
+Python 3.10 이상과 Node.js 22 이상이 필요합니다. 핵심 Python 런타임에는 외부 Python 의존성이 없습니다. `unittest`는 Python 기본 기능이며, 테스트에 API 키·PDF 업로드·데이터셋 다운로드가 필요하지 않습니다. 설치 과정은 패키지 저장소 접근이 필요할 수 있습니다. Windows와 프런트엔드 검증 방법은 [기여 안내](CONTRIBUTING.md)에 있습니다.
 
-### 2. 실제 시뮬레이션 설정
+### 2. 키 없이 화면 살펴보기
+
+```bash
+UPSTAGE_API_KEY= UPKINSEY_REQUIRE_BASIC_AUTH=0 upkinsey --host 127.0.0.1 --port 5173
+```
+
+<http://localhost:5173>에서 제품 소개와 입력 화면을 볼 수 있습니다. 이 명령은 **로컬 화면 확인 전용**이며 API 키와 인증을 끕니다. 시뮬레이션·PDF 분석은 동작하지 않으며 실제 결과를 예시로 대체하지 않습니다. 종료는 `Ctrl+C`입니다. 외부에 바인딩할 때는 아래 인증 설정을 사용하세요.
+
+### 3. 실제 시뮬레이션 설정
 
 ```bash
 python -m pip install -e '.[persona]'
@@ -103,13 +116,22 @@ UPKINSEY_BASIC_AUTH_PASSWORD=<a_long_unique_password>
 
 API 키가 없으면 라이브 추론은 실행되지 않습니다. 처음 사용하는 persona 패널은 Hugging Face에서 샘플링하여 로컬에 캐시합니다. 시뮬레이션은 제품 brief와 persona 맥락을 Upstage로 보내며, PDF 기능은 문서도 Upstage Document Parse로 전송합니다. 공유 가능한 가상 데이터와 작은 패널로 시작하세요.
 
-### 3. 로컬 앱 실행
+### 4. 로컬 앱 실행
 
 ```bash
-python scripts/run_upkinsey_server.py --host 127.0.0.1 --port 5173
+upkinsey --host 127.0.0.1 --port 5173
 ```
 
-<http://localhost:5173>에 접속하여 설정한 Basic Auth 계정으로 로그인하세요. `--host`를 명시하여 로컬 인터페이스에만 바인딩합니다. Node/npm은 앱 실행에 필요하지 않습니다.
+<http://localhost:5173>에 접속하여 설정한 Basic Auth 계정으로 로그인하세요. `--host`를 명시하여 로컬 인터페이스에만 바인딩합니다. 빌드 후에는 Node/npm 없이 Python 서버만 실행합니다. 같은 서버를 `python -m upstage_api_sim`으로 실행할 수 있고, 기존 `python scripts/run_upkinsey_server.py` 명령도 호환 launcher로 유지됩니다.
+
+소스 checkout에서는 `frontend-dist/`와 `data/`를 자동으로 찾습니다. 설치된 wheel만 사용하는 경우 기본 위치는 현재 디렉터리 기준이며 웹 자산을 별도로 빌드·복사해야 합니다:
+
+```bash
+upkinsey --static-dir /absolute/path/to/frontend-dist \
+  --data-dir /absolute/path/to/upkinsey-data --host 127.0.0.1 --port 5173
+```
+
+빌드된 HTML이 없으면 서버는 빌드 안내와 함께 종료합니다. `.env`는 소스 checkout 루트(설치된 wheel에서는 현재 디렉터리)에서 읽습니다.
 
 ## Docker / 배포
 
@@ -124,13 +146,18 @@ docker run --rm --env-file .env \
   upkinsey
 ```
 
+Docker는 Node 22 빌드 단계에서 웹 자산을 만들고 Python 3.11 런타임 이미지에는 Node를 포함하지 않습니다.
+
 외부 공개 시 HTTPS, 인증, 저장소 접근 통제와 백업이 필요합니다. Basic Auth는 사용자별 데이터 격리가 아닙니다. [배포 안내](PUBLIC_DEPLOYMENT.md)에서 Render/Docker, 프록시, 영속성, 운영 한계를 확인하세요.
 
 ## Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `UPKINSEY_STATIC_DIR` | `<root>/frontend-dist` | Built UI directory; `--static-dir` overrides it |
+| `UPKINSEY_DATA_DIR` | `<root>/data` | Persistent runs, persona cache, graph and trash; `--data-dir` overrides it |
 | `UPSTAGE_API_KEY` | — | Server-side Upstage API key |
+| `UPKINSEY_PERSONA_REVISION` | Unset | Optional Hugging Face commit/ref for new persona sampling; recorded as the requested reference |
 | `UPSTAGE_MODEL` | `solar-pro3` | Solar chat model |
 | `UPSTAGE_BASE_URL` | Upstage chat completions URL | Chat completion endpoint |
 | `UPKINSEY_REQUIRE_BASIC_AUTH` | `1` in `.env.example` | Enable HTTP Basic Auth |
@@ -144,7 +171,7 @@ docker run --rm --env-file .env \
 | `UPSTAGE_MAX_RETRIES` | `8` | Retry budget for 429/5xx/transport failures |
 | `UPSTAGE_MIN_REQUEST_INTERVAL_SECONDS` | `1.1` | Process-wide Upstage request spacing |
 
-See [`PUBLIC_DEPLOYMENT.md`](PUBLIC_DEPLOYMENT.md) for Render, Docker, auth, persistence, and production checklist notes.
+`<root>`는 소스 checkout 루트이며 wheel 설치에서는 현재 디렉터리입니다. 추가 설정은 [배포 안내](PUBLIC_DEPLOYMENT.md)에 있습니다.
 
 ## API surface
 
@@ -159,6 +186,7 @@ See [`PUBLIC_DEPLOYMENT.md`](PUBLIC_DEPLOYMENT.md) for Render, Docker, auth, per
 | `GET` | `/api/runs` | List saved simulation versions |
 | `GET` | `/api/runs/{version_id}` | Load saved simulation result |
 | `GET` | `/api/runs/compare/{version_id}` | Compare with previous related run |
+| `GET` | `/api/graph/summary` | Auth-protected local graph projection summary |
 
 ## Persona data
 
@@ -178,23 +206,35 @@ Sampled persona files and simulation outputs are gitignored by default.
 ## Project structure
 
 ```text
-prototype/                 # React/Babel browser prototype served by Python
-scripts/run_upkinsey_server.py
-                           # Static server + API endpoints
-src/upstage_api_sim/       # Core simulation, Upstage client, run store
-examples/                  # Example product briefs
-docs/                      # Design, persona prompting, service docs
-tests/                     # Unit tests
-PUBLIC_DEPLOYMENT.md       # Self-hosting and production checklist
+prototype/                   # React ES modules, CSS, HTML build templates
+scripts/build_frontend.mjs    # esbuild production build
+frontend-dist/               # Generated local browser assets (gitignored)
+package.json / package-lock.json
+src/upstage_api_sim/server.py # Installed HTTP app and CLI entrypoint
+src/upstage_api_sim/          # Simulation, input/interview/report modules,
+                             # provenance, JSON runs and SQLite graph projection
+scripts/run_upkinsey_server.py # Compatible source-checkout launcher
+examples/                    # Example product briefs
+docs/                        # Architecture, maintenance, research limitations
+tests/                       # Offline Python and frontend regression tests
+PUBLIC_DEPLOYMENT.md          # Self-hosting and deployment guide
 ```
 
 ## Safety & privacy
 
 - Keep API keys in `.env` or deployment secrets only. Never expose them to the browser.
-- Saved runs live under `data/simulation_runs/` and are gitignored.
+- Saved runs live under the configured data directory (`data/simulation_runs/` by default) and are gitignored. SQLite graph observations persist separately; deleting a run does not erase graph evidence. See [graph storage and retention](docs/knowledge-graph.md).
 - PDF uploads are handled in-memory locally but sent to Upstage Document Parse; review provider data policies before uploading sensitive material.
 - Public deployments should enable Basic Auth, job limits, and rate limits.
 - Synthetic outputs are for hypothesis generation, not representative survey evidence.
+
+## 실행 기록과 호환성
+
+새 JSON run은 저장 schema version 1과 provenance를 기록합니다. 패널·프롬프트 해시는 입력 비교용 식별자이며 원본을 복원하는 자료가 아닙니다. 데이터 revision이나 모델 식별자를 알 수 없으면 추정하지 않습니다. 같은 시드가 같은 모델 응답을 보장하지 않습니다. 기존 JSON 실행 파일은 유지되며 데이터 삭제·자동 변환을 요구하지 않습니다.
+
+Persona 샘플은 정확한 행 수·샘플링 메타데이터와 SHA-256 sidecar(`.jsonl.manifest.json`)를 검증해 캐시를 재사용합니다. 손상·불일치 파일은 캐시의 `.trash/`로 옮긴 뒤 다시 샘플링합니다. `UPKINSEY_PERSONA_REVISION` 또는 샘플링 CLI의 `--revision`에 commit/ref를 지정할 수 있습니다. 기록되는 값은 요청한 reference이며, 움직이는 branch 이름을 고정 commit으로 해석했다고 주장하지 않습니다. 더 나은 추적성을 위해 확인한 commit을 지정하세요.
+
+저장 성공 후 로컬 SQLite 그래프 투영을 시도합니다. 추가 서비스나 Python 의존성은 없으며, 그래프가 실패해도 JSON 저장은 유지됩니다. 과거 실행 backfill·백업·보존 한계는 [Knowledge graph](docs/knowledge-graph.md)를 참고하세요.
 
 ## 유지관리와 기여
 

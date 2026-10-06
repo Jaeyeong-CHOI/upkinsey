@@ -12,6 +12,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = []
 
+[project.scripts]
+upkinsey = "upstage_api_sim.server:main"
+
 [project.urls]
 Homepage = "https://github.com/Jaeyeong-CHOI/upkinsey"
 Issues = "https://github.com/Jaeyeong-CHOI/upkinsey/issues"
