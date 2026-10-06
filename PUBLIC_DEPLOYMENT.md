@@ -1,6 +1,6 @@
 # Public Deployment Guide
 
-Upkinsey serves the static prototype and API from the same Python process. Never put `UPSTAGE_API_KEY` in browser code; keep it as a server-side environment variable only.
+Upkinsey serves the static prototype and API from the same Python process. This is an early-stage, single-operator application, not a multi-tenant service. Never put `UPSTAGE_API_KEY` in browser code; keep it as a server-side environment variable only.
 
 ## Production safety defaults
 
@@ -113,3 +113,42 @@ UPKINSEY_ALLOW_DESTRUCTIVE_API=1
 ```
 
 Keep this off for public demos. Use it only in a private/admin deployment.
+
+
+## Reverse proxies and request identity
+
+The built-in limiter uses the socket peer address; arbitrary `X-Forwarded-For`
+and `CF-Connecting-IP` headers are not trusted. Behind a reverse proxy, requests
+therefore share the proxy's limit. Configure per-client limits at a trusted TLS
+proxy if needed, rather than exposing the Python process directly. Forward the
+original `Host` and preserve browser `Origin` / `Sec-Fetch-Site` headers; do not
+replace browser-supplied origin metadata with trusted values. Basic Auth must be
+used over HTTPS outside localhost. The Python server is not a hardened internet
+edge or a replacement for a proxy's connection/body timeouts and traffic limits.
+
+Use separate instances and data directories for separate trust groups. Every
+holder of the shared credentials can read the same runs. Browser localStorage
+also retains brief and report content; reset the session when using a shared
+browser. PDF extraction sends document contents to Upstage; evaluate that data
+flow before uploading confidential material.
+
+## Updating and rollback
+
+Review [the changelog](CHANGELOG.md) and [maintenance checklist](docs/maintaining.md)
+before changing the version. Back up `data/` outside the container, record the
+currently deployed commit and environment configuration (without copying secrets
+into Git), and verify the replacement locally before switching traffic. Keep the
+previous image/checkout available for rollback. Do not overwrite the only copy of
+saved research data while testing an upgrade.
+
+The default CI uses fixtures only. Passing it does not certify live Upstage API
+compatibility, Nemotron download access, or predictive validity of synthetic
+results. The frontend currently relies on version-pinned CDN scripts and fonts;
+it is not a fully offline web bundle.
+
+All paid routes (simulation, persona chat, analyst interviews, and PDF parsing)
+share `UPKINSEY_MAX_ACTIVE_JOBS`. This bounds active operations, not dollars or
+model tokens. Each operation can make several provider calls and retries; configure
+provider-side spend limits separately. Synchronous slots are released on failure.
+Browser cross-origin mutations are rejected, including multipart PDF submissions;
+ordinary CLI requests without an Origin header remain supported.

@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    env:
+      PYTHONPATH: src
+      UPSTAGE_API_KEY: ""
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run offline tests (no API keys or dataset installation)
+        run: python -m unittest discover -s tests -p 'test*.py' -v
+      - name: Compile all Python entry points
+        run: python -m compileall -q src scripts tests
+
+  frontend:
+    name: Frontend regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Run dependency-free frontend tests
+        run: node --test tests/frontend*.cjs
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the deployment image (no inference or publication)
+        run: docker build --tag upkinsey:ci .
+
+  package:
+    name: Build and install package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Build source distribution and wheel
+        run: |
+          python -m pip install build
+          python -m build --outdir "$RUNNER_TEMP/upkinsey-dist"
+      - name: Install wheel into a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/upkinsey-wheel"
+          "$RUNNER_TEMP/upkinsey-wheel/bin/python" -m pip install --no-deps "$RUNNER_TEMP"/upkinsey-dist/*.whl
+          "$RUNNER_TEMP/upkinsey-wheel/bin/python" -I - <<'PY'
+          import importlib
+          from importlib.metadata import version
+
+          for module in (
+              "upstage_api_sim",
+              "upstage_api_sim.document_parse",
+              "upstage_api_sim.env",
+              "upstage_api_sim.market_research",
+              "upstage_api_sim.personas.io",
+              "upstage_api_sim.personas.nemotron",
+              "upstage_api_sim.run_store",
+              "upstage_api_sim.upstage_client",
+          ):
+              importlib.import_module(module)
+          from upstage_api_sim import __version__
+          assert version("upstage-api-simulation") == __version__
+          PY

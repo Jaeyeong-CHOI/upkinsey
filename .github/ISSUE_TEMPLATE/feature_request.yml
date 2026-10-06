@@ -1,0 +1,28 @@
+name: Feature request / 개선 제안
+description: Describe a user need and a small, testable improvement.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem / 사용자 문제
+      description: Who is blocked, what are they trying to do, and what happens today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome / 원하는 결과
+      description: Describe the smallest useful change and how we would know it works.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs / 대안과 고려사항
+      description: Note any new dependencies, API cost, data handling, or compatibility impact.
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Optional help / 참여 의향 (선택)
+      options:
+        - label: I can help implement or test this. / 구현 또는 검증에 참여할 수 있습니다.

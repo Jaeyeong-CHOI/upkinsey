@@ -1,0 +1,34 @@
+name: Bug report / 버그 제보
+description: A reproducible software problem (한국어 / English welcome).
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. For vulnerabilities, follow SECURITY.md instead.
+        API keys, passwords, private briefs, persona datasets, and uploaded documents must not be included.
+        먼저 기존 이슈를 확인하고, 비밀키·개인정보·비공개 자료는 제거해 주세요.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Expected and actual behavior / 예상과 실제 동작
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction / 최소 재현 절차
+      description: Include a small invented brief or redacted input and exact steps. A paid API call is not required.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 실행 환경
+      description: Commit or release, Python version, OS, browser, and local or Docker deployment. Do not paste your .env.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted logs or screenshots / 비밀정보를 제거한 로그·화면
+      description: Include the error and relevant context only, not an entire saved run.

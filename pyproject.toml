@@ -1,13 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "upstage-api-simulation"
 version = "0.1.0"
 description = "Upstage API based simulation experiments with Korean persona sampling"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Jaeyeong-CHOI/upkinsey"
+Issues = "https://github.com/Jaeyeong-CHOI/upkinsey/issues"
+Documentation = "https://github.com/Jaeyeong-CHOI/upkinsey#readme"
 
 [project.optional-dependencies]
 persona = ["datasets>=2.18.0"]
 test = ["pytest>=8.0.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["upstage_api_sim*"]
+namespaces = false
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
