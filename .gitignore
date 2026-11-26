@@ -17,3 +17,7 @@ dist/
 .pytest_cache/
 frontend-dist/
 data/graph/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
